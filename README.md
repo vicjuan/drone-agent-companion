@@ -29,3 +29,20 @@ touch UI is replaced by an on-device web server operated from a browser.
   reuse strategy, safety boundaries, and open decisions.
 - [`docs/implementation-order.md`](docs/implementation-order.md): Weekend Web
   Control MVP-first coding order, with per-step completion criteria.
+
+## Workspace bootstrap
+
+Clone with the read-only vendor submodule and use JDK 17:
+
+```bash
+git clone --recurse-submodules https://github.com/vicjuan/drone-agent-companion.git
+cd drone-agent-companion
+export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home
+./gradlew build
+npm ci --prefix web-console
+npm run build --prefix web-console
+```
+
+Without a shared Android SDK, Gradle intentionally includes only the JDK modules. To configure
+`host-headless` and `vision-opencv-android`, expose the same SDK to this build and the included
+vendor build through `ANDROID_HOME` or `ANDROID_SDK_ROOT`.

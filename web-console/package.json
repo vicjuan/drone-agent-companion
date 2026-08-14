@@ -1,0 +1,14 @@
+{
+  "name": "@durendal/drone-agent-web-console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --project tsconfig.json && node scripts/copy-static.mjs",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test": "npm run typecheck"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

@@ -1,2 +1,13 @@
 # 週末交接用的暫時性文件，不進版本控制
 HANDOFF.md
+
+# Local build/tool state
+.gradle/
+.idea/
+.DS_Store
+local.properties
+**/build/
+
+# Web console dependencies and generated output
+web-console/node_modules/
+web-console/dist/

@@ -1,0 +1,3 @@
+[submodule "vendor/drone-agent-android"]
+	path = vendor/drone-agent-android
+	url = https://github.com/vicjuan/drone-agent-android.git

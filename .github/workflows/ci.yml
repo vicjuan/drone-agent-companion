@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workspace:
+    name: JVM workspace + web console + inherited boundaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web-console/package-lock.json
+
+      - name: Companion module boundaries
+        run: bash scripts/check-companion-boundaries.sh
+
+      - name: Inherited vendor-neutral boundary
+        run: bash vendor/drone-agent-android/scripts/check-core-vendor-neutral.sh
+
+      - name: Inherited core package ownership
+        run: bash vendor/drone-agent-android/scripts/check-core-package-ownership.sh
+
+      - name: Inherited frozen protocol fixtures
+        run: bash vendor/drone-agent-android/scripts/check-contract-fixture-sync.sh
+
+      - name: Inherited closed-loop execution boundary
+        run: bash vendor/drone-agent-android/scripts/check-closed-loop-not-executed.sh
+
+      - name: Build and test JDK-only workspace
+        run: env -u ANDROID_HOME -u ANDROID_SDK_ROOT ./gradlew build --no-daemon
+
+      - name: Install web-console dependencies
+        run: npm ci --prefix web-console
+
+      - name: Build and typecheck web console
+        run: npm run build --prefix web-console
