@@ -22,12 +22,8 @@ touch UI is replaced by an on-device web server operated from a browser.
 
 ## Documents
 
-Agents and new contributors start at [`HANDOFF.md`](HANDOFF.md).
-
-- [`HANDOFF.md`](HANDOFF.md): task background, current state, hard boundaries,
-  environment, and known traps.
-- [`AGENTS.md`](AGENTS.md): engineering discipline, inherited from
-  `drone-agent-android`.
+- [`AGENTS.md`](AGENTS.md): engineering discipline and hard boundaries,
+  inherited from `drone-agent-android`. Agents start here.
 - [`docs/architecture.md`](docs/architecture.md): system architecture, module
   reuse strategy, safety boundaries, and open decisions.
 - [`docs/implementation-order.md`](docs/implementation-order.md): coding order

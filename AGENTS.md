@@ -4,9 +4,8 @@ Guidance for AI agents (and humans) working in this repository.
 
 ## 開工前必讀
 
-1. [`HANDOFF.md`](HANDOFF.md) — 任務背景、現況盤點、不可跨越的邊界。
-2. [`docs/architecture.md`](docs/architecture.md) — 系統架構與安全邊界。
-3. [`docs/implementation-order.md`](docs/implementation-order.md) — 撰寫順序與完成判準。
+1. [`docs/architecture.md`](docs/architecture.md) — 系統架構與安全邊界。
+2. [`docs/implementation-order.md`](docs/implementation-order.md) — 撰寫順序與完成判準。
 
 ## 繼承的強制規範
 
@@ -31,4 +30,19 @@ Guidance for AI agents (and humans) working in this repository.
 - 目標 stack（Mini 4 Pro + RC-N3 + G520）的 capability matrix 全列 `UNKNOWN`
   起跳；`drone-agent-android` 在 Pixel 8 Pro stack 的 `CONFIRMED` **不得轉移**。
 
-詳細理由見 `HANDOFF.md` 第 4 節。
+## 環境
+
+```bash
+export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home
+```
+
+本機預設 JDK 是 25，會讓 Gradle 8.7 失敗，每個新 shell 都要先設定。這是最常見
+的假故障來源。
+
+## 本階段的驗證天花板
+
+G520 尚未到手，所有工作只能以 `adapter-mock` 與 Android emulator 驗證。可達到
+`RUNTIME_VERIFIED`（Mac 或 emulator 環境），**不可能達到 `HARDWARE_VERIFIED`**。
+
+mock 行為、可編譯、單元測試通過、issue 關閉，一律不構成硬體證據，不得用來把
+capability matrix 的任何一列從 `UNKNOWN` 升級。emulator 通過不代表 G520 通過。
