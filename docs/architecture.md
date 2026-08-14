@@ -28,6 +28,7 @@ G520（Android，無螢幕）
   │    ├─ console-server ── 靜態 SPA 與 WS 端點，命令送進既有 admission 政策
   │    ├─ gateway ── 維持 client，連出去接 drone-platform（協定不動）
   │    ├─ adapter-dji（MSDK V5）／adapter-mock（product flavor 隔離，沿用）
+  │    ├─ vision-opencv-* ── OpenCV backend + desktop/Android native runtime
   │    └─ evidence logging（沿用）
   ├─ 影像鏈：RTMP → MediaMTX → WHEP（MediaMTX 位置待決，見 open decisions）
   │  USB
@@ -49,6 +50,35 @@ RC-N3 ──────► DJI Mini 4 Pro
 | `adapter-dji`、`adapter-mock` | 直接重用；flavor 隔離規則照舊 |
 | `app`（Compose host） | 不重用 → 本 repo 的 `host-headless` |
 | `app-debug-ui` | 不重用 → 本 repo 的 `web-console`（browser SPA） |
+
+## OpenCV on-device 視覺決策
+
+`drone-agent-android:vision` 已有 `TapeSegmenter` 等 OpenCV 程式碼，但 OpenCV desktop
+artifact 是 `compileOnly`／`testImplementation`；Android runtime 刻意使用 pure-Kotlin
+fallback，APK 並沒有 OpenCV native runtime。因此「重用 `vision`」本身不能滿足本案
+的視覺需求。
+
+本 repo 新增三個 companion-owned 模組，避免 desktop loader 與 Android natives 混入
+同一產物：
+
+- `vision-opencv-core`（pure JVM）：依賴上游 `vision` 的 `LuminanceFrame`、`Segmenter`
+  與 result contracts，實作可注入 native initializer 的 OpenCV backend；
+- `vision-opencv-desktop`（JVM runtime）：只供 Mac fixture/replay 與 runner smoke，提供
+  desktop native loader／runtime dependency；
+- `vision-opencv-android`（Android library）：只供 `host-headless`，封裝 OpenCV Android
+  distribution、arm64 native packaging 與 Android initializer；
+- Android host 從 `drone-observation` 的 `DecodedFrameStream` 取得 vendor-neutral decoded
+  frames，轉成 `LuminanceFrame` 後實際執行 OpenCV 前處理、segmentation、feature／
+  target recognition 或 tracking；
+- 以 vendor-neutral result model 將結果送回 host、evidence 與 console；
+- 讓 OpenCV `Mat`、loader 與平台型別留在此邊界內，不進入 `core`、console protocol
+  或 command admission。
+
+Mac 上的 OpenCV fixture/replay 測試只能證明演算法；完成條件必須包含 G520 Android
+產物內的 native library 識別，以及 runtime log／result 證明實際呼叫 OpenCV。初始
+辨識目標與 OpenCV Android distribution 選型由 #14 落實，但「on-device 必須使用
+OpenCV」不是 open decision。RTMP → MediaMTX → WHEP 是給人眼觀看的另一條鏈，
+不得把 WHEP player 當作 CV input。
 
 沿用的機械檢查（vendor-neutral guard、APK boundary guard、
 closed-loop-not-executed guard）隨 submodule 一併生效，CI 必須執行。
@@ -86,5 +116,7 @@ G520 Android 上驗證固定 IP、指定介面 bind、開機可達性與 WebSock
 1. **MediaMTX 位置**：G520 機上（aarch64 binary 可行性）vs 地面站筆電。
 2. **USB 權限策略**：system/priv-app 自動授權 vs 一次性人工授權後記憶。
 3. **web console 產品化認證與傳輸安全**：區網 TLS（自簽憑證）與 token 佈建方式。
+4. **OpenCV 實作選型**：Android distribution／native packaging 方式與第一個可驗收的
+   visual-recognition target（#14）；使用 OpenCV 本身已定案。
 
 最後更新：2026-08-14。

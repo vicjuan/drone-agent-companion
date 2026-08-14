@@ -42,6 +42,11 @@ Guidance for AI agents (and humans) working in this repository.
   網路前必須完成。
 - UI 不需要固定的「MOCK DEMO」橫幅，但必須如實顯示 adapter、aircraft connection
   與 actuation lock 狀態，不得把 mock runtime 說成真機證據。
+- 本 repo 必須在 G520 Android runtime **實際載入並執行 OpenCV** 來支援視覺辨識；
+  只沿用 `drone-agent-android:vision` 的 desktop `compileOnly`／test dependency 不算完成。
+  OpenCV 型別與 native loading 必須封裝在本 repo 自有的 `vision-opencv-core`、
+  `vision-opencv-desktop`、`vision-opencv-android` 邊界內，不得洩漏到 `core`、console
+  protocol 或 command admission。
 
 ## 環境
 

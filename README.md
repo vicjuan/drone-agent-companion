@@ -18,6 +18,7 @@ touch UI is replaced by an on-device web server operated from a browser.
 | Operator UI | Compose (`app-debug-ui`) | Browser SPA served from the device |
 | Operator protocol | Compose UI reads the in-process state model | Own console protocol, served over WebSocket |
 | `gateway` role | Client of the drone-platform backend | Unchanged. The frozen agent protocol is not bent to serve the browser; the console protocol is separate and shares only the `core` state model and the `gateway.admission` policy objects |
+| OpenCV runtime | Desktop replay/test only; not packaged in the Android APK | Companion-owned OpenCV core/desktop/Android modules must load and execute OpenCV on G520 Android for visual recognition |
 | Reused modules | — | `core`, `drone-actuation`, `gateway`, `vision`, `drone-observation`, `adapter-dji`, `adapter-mock` |
 
 ## Documents

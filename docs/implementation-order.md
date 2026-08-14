@@ -62,6 +62,9 @@ console-protocol   Kotlin/JVM   console wire model 與 codec
 console-server     Kotlin/JVM   WebSocket server、靜態資源、政策接線
 console-runner     Kotlin/JVM   JDK-only 開發用 runner（對照 gateway-runner）
 web-console        TypeScript   瀏覽器 SPA
+vision-opencv-core     Kotlin/JVM  OpenCV backend + injected native initializer
+vision-opencv-desktop  Kotlin/JVM  Mac fixture/replay runtime（S10 實作）
+vision-opencv-android  Android     G520 native packaging／initializer（S10 實作）
 host-headless      Android app  無頭 host（S8 才開始填內容）
 ```
 
@@ -205,6 +208,25 @@ kill 後自動恢復且留下重啟紀錄。
 **完成判準**：瀏覽器可播放合成訊源；端到端延遲有量測紀錄（Mac 環境數字，
 不得當作 G520 的數字）。
 
+### S10　G520 on-device OpenCV 視覺辨識（issue #14，Weekend MVP 後）
+
+重用 `drone-agent-android:vision` 的 vendor-neutral frame/result contracts，但不能把它
+現有的 desktop `compileOnly` OpenCV 誤當成 Android runtime integration。本 repo 的
+`vision-opencv-core` 依賴 `LuminanceFrame` → `Segmenter` → `SegmentationResult` 這條
+最小 vendor-neutral 接縫；`vision-opencv-desktop` 提供 Mac native runtime；
+`vision-opencv-android` 負責 Android native packaging／initialization，並由 host 從
+`drone-observation` 接收 decoded frames，執行第一個經人類確認的 recognition／tracking
+pipeline。RTMP／WHEP 是人眼觀看鏈，不能取代 decoded-frame CV input。
+
+先在 Mac fixture/replay 驗證演算法，再於 emulator 驗證 packaging boundary；真正
+完成仍需在 G520 Android 上識別 native library 與 runtime build information，並以
+實際 frame → OpenCV operation → recognition result／evidence 證明執行路徑。
+
+**完成判準**：OpenCV 型別不洩漏到 `core`、console protocol 或 admission；Mac
+fixture 測試可區分有無 OpenCV 實作；Android 產物包含正確 ABI native library；G520
+runtime 產生 OpenCV build identity 與至少一筆實際辨識結果。Mac/emulator 證據不得
+升級 G520 capability matrix。
+
 ## 依賴關係
 
 ```text
@@ -213,11 +235,15 @@ S0 ─┬─> S1 ────────────────┐
                   ├────────────> S8 ──> S6  ← G520 到手後 commissioning
                   └────────────> S9
 S6 ──> S7  ← 擴大到共享／可路由網路前
+S8 + decoded-frame source ──> S10  ← OpenCV on-device vision
 ```
 
 S1 與 S2 可並行。週末先完成 S0–S5；S8 只要 S3 完成即可開始，但若資源有限，排在
 可見的 S5 之後。S6 需要 G520 Android 真板。S7 是產品化 gate，不阻塞 localhost
 mock demo 或受控點對點 commissioning。
+
+S10 是明確產品需求，但不插隊阻塞 Weekend Web Control MVP；其 G520 runtime 驗證依賴
+S8 host 與 #9 的真機 decoded-frame path。
 
 ## 週末無法驗證、下週才可開始的工作
 
