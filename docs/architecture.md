@@ -54,9 +54,10 @@ closed-loop-not-executed guard）隨 submodule 一併生效，CI 必須執行。
 
 ## 安全邊界（沿用且不得弱化）
 
-1. **Strict command authority 不因 UI 換成瀏覽器而放寬。** 瀏覽器 console
-   是 gateway client，命令進入既有 admission/authority/audit 路徑；不存在
-   繞過 gateway 的 HTTP 直接致動端點。
+1. **Strict command authority 不因 UI 換成瀏覽器而放寬。** 瀏覽器 console 是
+   受認證的 console client，不是特權通道；其命令一律進入既有
+   `CommandAdmissionPolicy` 與 authority/audit 路徑，不存在繞過 admission 的
+   HTTP 或 WebSocket 致動端點。
 2. **致動 fail-closed。** 未經授權路徑與本 stack 證據，閉環輸出維持
    observation-only。
 3. **Web console 需認證。** 未認證連線只能取得健康檢查，拿不到 telemetry

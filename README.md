@@ -16,10 +16,19 @@ touch UI is replaced by an on-device web server operated from a browser.
 | --- | --- | --- |
 | Host device | Pixel 8 Pro (touch UI) | G520, headless |
 | Operator UI | Compose (`app-debug-ui`) | Browser SPA served from the device |
-| Gateway role | Client connecting out to a platform gateway | Server hosted on the device; the browser console is a gateway client |
+| Operator protocol | Compose UI reads the in-process state model | Own console protocol, served over WebSocket |
+| `gateway` role | Client of the drone-platform backend | Unchanged. The frozen agent protocol is not bent to serve the browser; the console protocol is separate and shares only the `core` state model and the `gateway.admission` policy objects |
 | Reused modules | — | `core`, `drone-actuation`, `gateway`, `vision`, `drone-observation`, `adapter-dji`, `adapter-mock` |
 
 ## Documents
 
+Agents and new contributors start at [`HANDOFF.md`](HANDOFF.md).
+
+- [`HANDOFF.md`](HANDOFF.md): task background, current state, hard boundaries,
+  environment, and known traps.
+- [`AGENTS.md`](AGENTS.md): engineering discipline, inherited from
+  `drone-agent-android`.
 - [`docs/architecture.md`](docs/architecture.md): system architecture, module
   reuse strategy, safety boundaries, and open decisions.
+- [`docs/implementation-order.md`](docs/implementation-order.md): coding order
+  for the no-hardware phase, with per-step completion criteria.
