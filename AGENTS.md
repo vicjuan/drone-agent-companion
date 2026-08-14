@@ -26,9 +26,22 @@ Guidance for AI agents (and humans) working in this repository.
 - `drone-agent-android` 是**唯讀** submodule，不在其中修改或 commit。
 - `contracts/agent-protocol/` 是跨 repo 凍結契約，不得為 UI 需求更動。
 - 命令一律走 `CommandAdmissionPolicy`，不得有繞過的端點。
-- 致動類命令在 server 與 UI 兩層都必須 fail-closed。
+- 致動類命令可在 `adapter-mock` 下端到端執行；真機預設 fail-closed，只能在明確的
+  hardware commissioning session 中逐項開放。瀏覽器斷線、控制租約失效或命令逾時
+  時必須回到 neutral。
 - 目標 stack（Mini 4 Pro + RC-N3 + G520）的 capability matrix 全列 `UNKNOWN`
   起跳；`drone-agent-android` 在 Pixel 8 Pro stack 的 `CONFIRMED` **不得轉移**。
+
+## Weekend Web Control MVP 邊界
+
+- 週末目標是以 `adapter-mock` 跑通可見、可操作的完整 Web 控制面，包括 takeoff、
+  landing、RTH、上升／下降、前進／後退、左旋／右旋。
+- 開發 runner 只綁 `127.0.0.1`。G520 commissioning 則只綁點對點 Ethernet 介面；
+  Windows 不得開啟 Internet Connection Sharing 或 network bridge。
+- 帳號、密碼、TLS 與 credential lifecycle 不在週末 MVP；在擴大到任何共享或可路由
+  網路前必須完成。
+- UI 不需要固定的「MOCK DEMO」橫幅，但必須如實顯示 adapter、aircraft connection
+  與 actuation lock 狀態，不得把 mock runtime 說成真機證據。
 
 ## 環境
 

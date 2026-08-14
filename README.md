@@ -26,5 +26,5 @@ touch UI is replaced by an on-device web server operated from a browser.
   inherited from `drone-agent-android`. Agents start here.
 - [`docs/architecture.md`](docs/architecture.md): system architecture, module
   reuse strategy, safety boundaries, and open decisions.
-- [`docs/implementation-order.md`](docs/implementation-order.md): coding order
-  for the no-hardware phase, with per-step completion criteria.
+- [`docs/implementation-order.md`](docs/implementation-order.md): Weekend Web
+  Control MVP-first coding order, with per-step completion criteria.

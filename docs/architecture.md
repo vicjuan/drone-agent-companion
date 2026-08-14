@@ -17,9 +17,10 @@
 ## 系統構成
 
 ```text
-操作者筆電/手機瀏覽器
+Windows 操作者筆電瀏覽器
   │  SPA：儀表板 + 操縱介面 + WHEP 影像播放
-  │  HTTP/WebSocket（區網）
+  │  USB 轉 RJ-45 + 點對點 Ethernet（固定 IP）
+  │  HTTP/WebSocket
   ▼
 G520（Android，無螢幕）
   ├─ host-headless（Android app）
@@ -52,25 +53,38 @@ RC-N3 ──────► DJI Mini 4 Pro
 沿用的機械檢查（vendor-neutral guard、APK boundary guard、
 closed-loop-not-executed guard）隨 submodule 一併生效，CI 必須執行。
 
-## 安全邊界（沿用且不得弱化）
+## 安全與 commissioning 邊界
 
-1. **Strict command authority 不因 UI 換成瀏覽器而放寬。** 瀏覽器 console 是
-   受認證的 console client，不是特權通道；其命令一律進入既有
+1. **Strict command authority 不因 UI 換成瀏覽器而放寬。** 瀏覽器 console 不是
+   特權通道；其命令一律進入既有
    `CommandAdmissionPolicy` 與 authority/audit 路徑，不存在繞過 admission 的
    HTTP 或 WebSocket 致動端點。
-2. **致動 fail-closed。** 未經授權路徑與本 stack 證據，閉環輸出維持
-   observation-only。
-3. **Web console 需認證。** 未認證連線只能取得健康檢查，拿不到 telemetry
-   與命令面。
-4. **Evidence logging 不可關閉。** 命令、authority 決策、safety action
-   一律落地可回收的審計紀錄。
+2. **Mock 可執行不等於真機可執行。** Weekend MVP 允許 takeoff、landing、RTH 與
+   virtual-stick 命令在 `adapter-mock` 下端到端執行。真機啟動時預設鎖住致動，
+   只能由明確的 hardware commissioning session 逐項開放並產生第一手證據；一般
+   operational profile 不得把 `UNKNOWN` 當作已確認能力。
+3. **連續控制 fail-closed。** virtual-stick 採單一 operator control lease、命令
+   sequence/TTL 與 server-side dead-man timeout；瀏覽器放開控制、失焦、斷線或
+   lease 失效時，server 必須主動送出 neutral，不能保留最後一次輸入。
+4. **Weekend MVP 不建立帳號系統。** Mac runner 只綁 `127.0.0.1`；G520 初次
+   commissioning 只綁點對點 Ethernet 介面。Windows 與 G520 使用固定 IP，且 Windows
+   不得開啟 Internet Connection Sharing 或 network bridge。進入共享、無線或可路由
+   網路前，必須先完成 #5 的認證與傳輸安全。
+5. **狀態必須如實呈現。** UI 不需要固定的「MOCK DEMO」橫幅，但必須顯示目前
+   adapter（Mock／DJI）、aircraft connection 與 actuation lock 狀態。
+6. **Evidence logging 不可關閉。** 命令、authority 決策、control lease、neutral
+   safety action 與 commissioning 狀態轉換一律落地可回收的審計紀錄。
+
+## 已決定的網路拓樸
+
+初期唯一拓樸是 Windows 筆電透過 USB 轉 RJ-45 與網路線直連 G520。#6 負責在
+G520 Android 上驗證固定 IP、指定介面 bind、開機可達性與 WebSocket 穩定性，不再
+比較 Wi-Fi AP 或 USB RNDIS。
 
 ## Open decisions（各自有對應 issue）
 
 1. **MediaMTX 位置**：G520 機上（aarch64 binary 可行性）vs 地面站筆電。
-2. **瀏覽器到 G520 的網路拓樸**：Ethernet 直連、G520 開 Wi-Fi AP、或
-   USB RNDIS。
-3. **USB 權限策略**：system/priv-app 自動授權 vs 一次性人工授權後記憶。
-4. **web console 認證與傳輸安全**：區網 TLS（自簽憑證）與 token 佈建方式。
+2. **USB 權限策略**：system/priv-app 自動授權 vs 一次性人工授權後記憶。
+3. **web console 產品化認證與傳輸安全**：區網 TLS（自簽憑證）與 token 佈建方式。
 
 最後更新：2026-08-14。
