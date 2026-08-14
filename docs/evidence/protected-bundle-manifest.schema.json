@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vicjuan/drone-agent-companion/blob/main/docs/evidence/protected-bundle-manifest.schema.json",
+  "title": "Protected G520 capability evidence bundle manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "recordKind",
+    "bundleId",
+    "deviceSetId",
+    "targetStack",
+    "capturedAt",
+    "testedCommit",
+    "operator",
+    "runtimeProfile",
+    "hardwareSerials",
+    "files"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "recordKind": {
+      "const": "PROTECTED_EVIDENCE_MANIFEST"
+    },
+    "bundleId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "not": { "const": "00000000-0000-4000-8000-000000000000" }
+    },
+    "deviceSetId": {
+      "type": "string",
+      "pattern": "^device-set:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "not": { "const": "device-set:00000000-0000-4000-8000-000000000000" }
+    },
+    "targetStack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["aircraft", "remoteController", "host"],
+      "properties": {
+        "aircraft": {
+          "const": "DJI Mini 4 Pro"
+        },
+        "remoteController": {
+          "const": "DJI RC-N3"
+        },
+        "host": {
+          "const": "MediaTek Genio 520 (Android)"
+        }
+      }
+    },
+    "capturedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "testedCommit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "not": { "const": "0000000000000000000000000000000000000000" }
+    },
+    "operator": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "const": "REPLACE_WITH_OPERATOR" }
+    },
+    "runtimeProfile": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "const": "REPLACE_WITH_RUNTIME_PROFILE" }
+    },
+    "hardwareSerials": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["g520", "remoteController", "aircraft"],
+      "properties": {
+        "g520": {
+          "type": "string",
+          "minLength": 1,
+          "not": { "const": "REPLACE_WITH_RAW_G520_SERIAL" }
+        },
+        "remoteController": {
+          "type": "string",
+          "minLength": 1,
+          "not": { "const": "REPLACE_WITH_RAW_RCN3_SERIAL" }
+        },
+        "aircraft": {
+          "type": "string",
+          "minLength": 1,
+          "not": { "const": "REPLACE_WITH_RAW_AIRCRAFT_SERIAL" }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/evidenceFile"
+      }
+    }
+  },
+  "$defs": {
+    "evidenceFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "mediaType", "byteLength"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
+          "not": { "pattern": "(^|/)\\.{1,2}(/|$)" }
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "not": { "const": "0000000000000000000000000000000000000000000000000000000000000000" }
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

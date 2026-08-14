@@ -8,7 +8,8 @@
 
 本 repo 沿用 `drone-agent-android` 的證據紀律：
 
-- `docs/capability-matrix.md`（本 repo 版本）是本 stack 唯一的硬體證據來源。
+- `config/capability-matrix/g520-stack.json` 是本 stack 唯一的機器可讀硬體證據來源；
+  `docs/capability-matrix.md` 是由它 deterministic 產生並由測試鎖住的 review view。
 - Pixel 8 Pro stack 的 `CONFIRMED` **不得**轉移到本 stack。USB host 控制器、
   Android build、kernel 都不同；Mini 4 Pro + RC-N3 + G520 (Android) 的每一列
   硬體狀態自 `UNKNOWN` 起跳，直到本 stack 第一手證據存在。
@@ -50,6 +51,11 @@ RC-N3 ──────► DJI Mini 4 Pro
 | `adapter-dji`、`adapter-mock` | 直接重用；flavor 隔離規則照舊 |
 | `app`（Compose host） | 不重用 → 本 repo 的 `host-headless` |
 | `app-debug-ui` | 不重用 → 本 repo 的 `web-console`（browser SPA） |
+
+本 repo 自有的 `capability-matrix` 是 pure-JVM 模組：載入並 fail-closed 驗證上述 canonical
+JSON、投影上游五個 `core` capability，並產生 Markdown。`console-server` 讀取 bundled
+immutable snapshot；`web-console` build 複製同一 JSON。即時 adapter／connection／
+actuation lock／lease 狀態是另一份 runtime 資料，不得覆寫 evidence status。
 
 ## OpenCV on-device 視覺決策
 

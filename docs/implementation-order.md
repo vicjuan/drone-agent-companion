@@ -59,6 +59,7 @@ export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home
 
 ```text
 console-protocol   Kotlin/JVM   console wire model 與 codec
+capability-matrix  Kotlin/JVM   G520 evidence data、validator 與 Markdown renderer
 console-server     Kotlin/JVM   WebSocket server、靜態資源、政策接線
 console-runner     Kotlin/JVM   JDK-only 開發用 runner（對照 gateway-runner）
 web-console        TypeScript   瀏覽器 SPA
@@ -82,8 +83,10 @@ submodule 內既有的 guard 腳本（`check-core-vendor-neutral.sh` 等）納�
 硬體能力初始一律 `UNKNOWN`。這份資料是 operational readiness 與硬體結論的唯一
 證據來源；它不能因 mock 成功而升級，也不能被拿來宣稱下週真機一定可用。
 
-`core/capability/CapabilityMatrix.kt` 已有型別可重用。做法：本 repo 提供
-G520 stack 的 matrix 資料來源，`console-server` 與 `web-console` 讀它呈現能力
+`core/capability/CapabilityMatrix.kt` 已有五個 telemetry／streaming 型別可投影，但它
+不足以表示 G520 boot、Ethernet、USB、MSDK、致動與 OpenCV commissioning，因此由本
+repo 的 pure-JVM `capability-matrix` 模組持有完整 open-ID schema。canonical source 是
+`config/capability-matrix/g520-stack.json`；`console-server` 與 `web-console` 讀它呈現能力
 證據。一般 operational profile 依 matrix 決定可開放範圍；明確的 hardware
 commissioning session 可在人工控制的測試條件下逐項產生第一手證據，但不能預先把
 `UNKNOWN` 改成可用。markdown 文件與這份資料由同一來源產生或以測試鎖住一致性。

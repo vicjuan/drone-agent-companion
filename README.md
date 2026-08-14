@@ -8,7 +8,7 @@ touch UI is replaced by an on-device web server operated from a browser.
 > **Evidence boundary:** capability evidence recorded against the
 > Pixel 8 Pro stack does **not** transfer to this stack. Every hardware row for
 > **Mini 4 Pro + RC-N3 + G520 (Android)** starts at `UNKNOWN` until first-hand
-> evidence exists on this stack. See [`docs/architecture.md`](docs/architecture.md).
+> evidence exists on this stack. See [`docs/capability-matrix.md`](docs/capability-matrix.md).
 
 ## What changes vs. drone-agent-android
 
@@ -29,6 +29,8 @@ touch UI is replaced by an on-device web server operated from a browser.
   reuse strategy, safety boundaries, and open decisions.
 - [`docs/implementation-order.md`](docs/implementation-order.md): Weekend Web
   Control MVP-first coding order, with per-step completion criteria.
+- [`docs/capability-matrix.md`](docs/capability-matrix.md): generated human-readable
+  view of the canonical G520 evidence matrix.
 
 ## Workspace bootstrap
 
@@ -40,7 +42,7 @@ cd drone-agent-companion
 export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home
 ./gradlew build
 npm ci --prefix web-console
-npm run build --prefix web-console
+npm test --prefix web-console
 ```
 
 Without a shared Android SDK, Gradle intentionally includes only the JDK modules. To configure

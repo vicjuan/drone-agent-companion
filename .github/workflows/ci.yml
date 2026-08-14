@@ -52,5 +52,5 @@ jobs:
       - name: Install web-console dependencies
         run: npm ci --prefix web-console
 
-      - name: Build and typecheck web console
-        run: npm run build --prefix web-console
+      - name: Build and test web console
+        run: npm test --prefix web-console

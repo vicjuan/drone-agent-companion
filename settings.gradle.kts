@@ -25,6 +25,7 @@ rootProject.name = "drone-agent-companion"
 // JDK-only modules are always available, including on CI hosts without an
 // Android SDK. web-console is an npm project rather than a Gradle subproject.
 include(":console-protocol")
+include(":capability-matrix")
 include(":console-server")
 include(":console-runner")
 include(":vision-opencv-core")

@@ -11,3 +11,7 @@ local.properties
 # Web console dependencies and generated output
 web-console/node_modules/
 web-console/dist/
+
+# Raw commissioning evidence can contain device serials and must never enter this public repo.
+/artifacts/
+/evidence-private/

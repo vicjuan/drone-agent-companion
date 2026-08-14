@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "recordKind": "TEMPLATE",
+  "bundleId": "00000000-0000-4000-8000-000000000000",
+  "deviceSetId": "device-set:00000000-0000-4000-8000-000000000000",
+  "targetStack": {
+    "aircraft": "DJI Mini 4 Pro",
+    "remoteController": "DJI RC-N3",
+    "host": "MediaTek Genio 520 (Android)"
+  },
+  "capturedAt": "2026-08-15T00:00:00Z",
+  "testedCommit": "0000000000000000000000000000000000000000",
+  "operator": "REPLACE_WITH_OPERATOR",
+  "runtimeProfile": "REPLACE_WITH_RUNTIME_PROFILE",
+  "hardwareSerials": {
+    "g520": "REPLACE_WITH_RAW_G520_SERIAL",
+    "remoteController": "REPLACE_WITH_RAW_RCN3_SERIAL",
+    "aircraft": "REPLACE_WITH_RAW_AIRCRAFT_SERIAL"
+  },
+  "files": [
+    {
+      "path": "raw/session.jsonl",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "mediaType": "application/x-ndjson",
+      "byteLength": 0
+    }
+  ]
+}

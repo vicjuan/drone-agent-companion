@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "templates": [
+    {
+      "id": "template-mock-run",
+      "recordKind": "TEMPLATE",
+      "environment": "MOCK",
+      "capturedAt": "2026-08-15T00:00:00Z",
+      "commit": "0000000000000000000000000000000000000000",
+      "operator": "example-operator",
+      "runtimeProfile": "localhost-adapter-mock",
+      "deviceSetId": null,
+      "rawLogLocation": "evidence://bundle/00000000-0000-4000-8000-000000000000/raw/mock-session.jsonl",
+      "trackingIssue": 12,
+      "outcome": "PASS",
+      "summary": "Template only: proves mock behavior, never target-stack hardware capability."
+    },
+    {
+      "id": "template-android-emulator-run",
+      "recordKind": "TEMPLATE",
+      "environment": "ANDROID_EMULATOR",
+      "capturedAt": "2026-08-15T00:00:00Z",
+      "commit": "0000000000000000000000000000000000000000",
+      "operator": "example-operator",
+      "runtimeProfile": "android-emulator-mock",
+      "deviceSetId": null,
+      "rawLogLocation": "evidence://bundle/00000000-0000-4000-8000-000000000000/raw/emulator-session.jsonl",
+      "trackingIssue": 2,
+      "outcome": "PASS",
+      "summary": "Template only: proves emulator runtime behavior, never G520 hardware behavior."
+    },
+    {
+      "id": "template-g520-hardware-run",
+      "recordKind": "TEMPLATE",
+      "environment": "G520_HARDWARE",
+      "capturedAt": "2026-08-15T00:00:00Z",
+      "commit": "0000000000000000000000000000000000000000",
+      "operator": "example-operator",
+      "runtimeProfile": "g520-hardware-commissioning",
+      "deviceSetId": "device-set:00000000-0000-4000-8000-000000000000",
+      "rawLogLocation": "evidence://bundle/00000000-0000-4000-8000-000000000000/raw/g520-commissioning-session.jsonl",
+      "trackingIssue": 9,
+      "outcome": "PASS",
+      "summary": "Template only: replace every example value with first-hand commissioning evidence."
+    }
+  ]
+}

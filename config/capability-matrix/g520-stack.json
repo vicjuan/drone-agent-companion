@@ -1,0 +1,166 @@
+{
+  "schemaVersion": 1,
+  "matrixId": "mini4pro-rcn3-g520-android",
+  "targetStack": {
+    "aircraft": "DJI Mini 4 Pro",
+    "remoteController": "DJI RC-N3",
+    "host": "MediaTek Genio 520 (Android)"
+  },
+  "lastUpdated": "2026-08-15",
+  "rows": [
+    {
+      "id": "battery",
+      "title": "Battery telemetry",
+      "status": "UNKNOWN",
+      "assessment": "No first-hand evidence from the target stack.",
+      "verificationMethod": "Capture charge, voltage and temperature from a connected aircraft on G520.",
+      "trackingIssues": [9],
+      "evidenceRefs": []
+    },
+    {
+      "id": "gps_position",
+      "title": "GPS position telemetry",
+      "status": "UNKNOWN",
+      "assessment": "No first-hand evidence from the target stack.",
+      "verificationMethod": "Capture fix, coordinates, altitude and satellite count outdoors on the target stack.",
+      "trackingIssues": [9],
+      "evidenceRefs": []
+    },
+    {
+      "id": "flight_state",
+      "title": "Flight-state telemetry",
+      "status": "UNKNOWN",
+      "assessment": "No first-hand evidence from the target stack.",
+      "verificationMethod": "Correlate armed, flying, mode, home point and velocity fields with target-stack observations.",
+      "trackingIssues": [9],
+      "evidenceRefs": []
+    },
+    {
+      "id": "gimbal_camera_state",
+      "title": "Gimbal and camera telemetry",
+      "status": "UNKNOWN",
+      "assessment": "No first-hand evidence from the target stack.",
+      "verificationMethod": "Capture gimbal attitude and camera mode/recording state from the target stack.",
+      "trackingIssues": [9],
+      "evidenceRefs": []
+    },
+    {
+      "id": "stream_capability",
+      "title": "Aircraft-camera RTMP stream",
+      "status": "UNKNOWN",
+      "assessment": "No first-hand evidence from the target stack.",
+      "verificationMethod": "Publish the aircraft camera to the selected RTMP ingest and recover the stream through WHEP.",
+      "trackingIssues": [7],
+      "evidenceRefs": []
+    },
+    {
+      "id": "headless_boot_service",
+      "title": "Headless boot service",
+      "status": "UNKNOWN",
+      "assessment": "Emulator behavior is not G520 hardware evidence.",
+      "verificationMethod": "Cold-boot G520 and verify foreground service startup and recovery without an Activity.",
+      "trackingIssues": [2],
+      "evidenceRefs": []
+    },
+    {
+      "id": "point_to_point_ethernet",
+      "title": "Point-to-point Ethernet console",
+      "status": "UNKNOWN",
+      "assessment": "The topology is selected but has not been verified on G520.",
+      "verificationMethod": "Verify fixed IP, interface-specific bind, SPA fetch and stable WebSocket over direct Ethernet.",
+      "trackingIssues": [6],
+      "evidenceRefs": []
+    },
+    {
+      "id": "rcn3_usb_attach",
+      "title": "RC-N3 USB attach and permission",
+      "status": "UNKNOWN",
+      "assessment": "No first-hand G520 USB-host or permission evidence.",
+      "verificationMethod": "Attach RC-N3 to G520, record enumeration, permission and reconnect behavior.",
+      "trackingIssues": [8],
+      "evidenceRefs": []
+    },
+    {
+      "id": "msdk_registration_activation",
+      "title": "MSDK registration and activation",
+      "status": "UNKNOWN",
+      "assessment": "No first-hand MSDK activation evidence from G520.",
+      "verificationMethod": "Register MSDK on G520 and capture activation plus product-connection state.",
+      "trackingIssues": [9],
+      "evidenceRefs": []
+    },
+    {
+      "id": "aircraft_connection",
+      "title": "Mini 4 Pro aircraft connection",
+      "status": "UNKNOWN",
+      "assessment": "No first-hand aircraft connection evidence from G520.",
+      "verificationMethod": "Record the G520 to RC-N3 to Mini 4 Pro connection lifecycle and stable connected state.",
+      "trackingIssues": [9],
+      "evidenceRefs": []
+    },
+    {
+      "id": "rcn3_four_axis_input",
+      "title": "RC-N3 four-axis input",
+      "status": "UNKNOWN",
+      "assessment": "No first-hand stick-axis evidence from the target stack.",
+      "verificationMethod": "Capture all four RC-N3 axes with neutral, sign and range checks on G520.",
+      "trackingIssues": [8, 9],
+      "evidenceRefs": []
+    },
+    {
+      "id": "takeoff_actuation",
+      "title": "Takeoff actuation",
+      "status": "UNKNOWN",
+      "assessment": "Mock takeoff is simulation and does not confirm hardware actuation.",
+      "verificationMethod": "Run the approved commissioning takeoff case and retain admission, command and flight-state evidence.",
+      "trackingIssues": [9],
+      "evidenceRefs": []
+    },
+    {
+      "id": "landing_actuation",
+      "title": "Landing actuation",
+      "status": "UNKNOWN",
+      "assessment": "Mock landing is simulation and does not confirm hardware actuation.",
+      "verificationMethod": "Run the approved commissioning landing case and retain command plus grounded-state evidence.",
+      "trackingIssues": [9],
+      "evidenceRefs": []
+    },
+    {
+      "id": "rth_actuation",
+      "title": "Return-to-home actuation",
+      "status": "UNKNOWN",
+      "assessment": "No target-stack execution path has been verified.",
+      "verificationMethod": "Run the approved commissioning RTH case and capture admission, execution and terminal state.",
+      "trackingIssues": [9],
+      "evidenceRefs": []
+    },
+    {
+      "id": "virtual_stick_actuation",
+      "title": "Virtual-stick actuation",
+      "status": "UNKNOWN",
+      "assessment": "Mock velocity commands do not confirm G520 or aircraft authority.",
+      "verificationMethod": "Verify climb, descend, forward, backward, yaw-left and yaw-right under commissioning controls.",
+      "trackingIssues": [9],
+      "evidenceRefs": []
+    },
+    {
+      "id": "continuous_control_neutralization",
+      "title": "Continuous-control neutralization",
+      "status": "UNKNOWN",
+      "assessment": "Software tests cannot confirm the aircraft response on this stack.",
+      "verificationMethod": "Observe neutral behavior after release, focus loss, disconnect, lease expiry and dead-man timeout.",
+      "trackingIssues": [9],
+      "evidenceRefs": []
+    },
+    {
+      "id": "opencv_on_device_recognition",
+      "title": "On-device OpenCV recognition",
+      "status": "UNKNOWN",
+      "assessment": "Desktop and emulator runs are not G520 runtime evidence.",
+      "verificationMethod": "Identify the loaded G520 native build and retain a decoded-frame to OpenCV result trace.",
+      "trackingIssues": [14],
+      "evidenceRefs": []
+    }
+  ],
+  "evidenceRecords": []
+}

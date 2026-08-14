@@ -6,9 +6,11 @@
   "scripts": {
     "build": "tsc --project tsconfig.json && node scripts/copy-static.mjs",
     "typecheck": "tsc --project tsconfig.json --noEmit",
-    "test": "npm run typecheck"
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "devDependencies": {
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "typescript": "7.0.2"
   }
 }
