@@ -24,9 +24,9 @@
 G520（Android，無螢幕）
   ├─ host-headless（Android app）
   │    ├─ 開機自啟 foreground service，無 Activity UI 依賴
-  │    ├─ gateway ── server mode，沿用既有命令契約與 strict authority
+  │    ├─ console-server ── 靜態 SPA 與 WS 端點，命令送進既有 admission 政策
+  │    ├─ gateway ── 維持 client，連出去接 drone-platform（協定不動）
   │    ├─ adapter-dji（MSDK V5）／adapter-mock（product flavor 隔離，沿用）
-  │    ├─ web-console-server ── 靜態 SPA 與 WS 端點
   │    └─ evidence logging（沿用）
   ├─ 影像鏈：RTMP → MediaMTX → WHEP（MediaMTX 位置待決，見 open decisions）
   │  USB
@@ -43,7 +43,7 @@ RC-N3 ──────► DJI Mini 4 Pro
 | --- | --- |
 | `core` | 直接重用：vendor-neutral domain model 與 safety contracts |
 | `drone-actuation` | 直接重用：本地控制契約、arbitration、watchdog policy |
-| `gateway` | 重用並擴充：新增 server-side hosting（原本只有 client transport） |
+| `gateway` | 直接重用且**不擴充 wire 協定**：它實作與 drone-platform 凍結的 Phase-0 agent protocol（由 `contracts/agent-protocol/CANONICAL.sha256` 鎖住），維持 client 角色。瀏覽器由本 repo 自有的 console 協定服務；兩者共用 `core` 狀態模型與 `gateway.admission` 政策物件，不共用 wire format。詳見 [`implementation-order.md`](implementation-order.md) |
 | `vision`、`drone-observation` | 直接重用 |
 | `adapter-dji`、`adapter-mock` | 直接重用；flavor 隔離規則照舊 |
 | `app`（Compose host） | 不重用 → 本 repo 的 `host-headless` |
