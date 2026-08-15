@@ -3,7 +3,9 @@ import {
   CONTROL_VECTORS,
   type ControlVector,
 } from "./console-client.js";
-import { dispatchConfirmedCommand } from "./console-actions.js";
+import {
+  DiscreteCommandConfirmation,
+} from "./console-actions.js";
 import {
   ContinuousHoldController,
   installGlobalHoldEndListeners,
@@ -127,6 +129,19 @@ root.innerHTML = `
         </section>
       </div>
     </main>
+
+    <dialog id="command-confirmation" class="confirmation-dialog" aria-labelledby="confirmation-title" aria-describedby="confirmation-prompt confirmation-safety">
+      <form id="confirmation-form" class="confirmation-card" method="dialog">
+        <p class="eyebrow">OPERATOR CONFIRMATION</p>
+        <h2 id="confirmation-title">確認飛行命令</h2>
+        <p id="confirmation-prompt" class="confirmation-prompt"></p>
+        <p id="confirmation-safety" class="confirmation-safety" aria-live="polite" hidden></p>
+        <div class="confirmation-actions">
+          <button class="button button--quiet" type="submit" value="cancel">取消</button>
+          <button id="confirmation-confirm" class="button button--danger" type="submit" value="confirm">確認送出</button>
+        </div>
+      </form>
+    </dialog>
   </div>
 `;
 
@@ -163,6 +178,12 @@ const refs = {
   commandLog: requireElement<HTMLOListElement>("#command-log"),
   capabilityDate: requireElement<HTMLElement>("#capability-date"),
   capabilityList: requireElement<HTMLElement>("#capability-list"),
+  confirmationDialog: requireElement<HTMLDialogElement>("#command-confirmation"),
+  confirmationForm: requireElement<HTMLFormElement>("#confirmation-form"),
+  confirmationTitle: requireElement<HTMLElement>("#confirmation-title"),
+  confirmationPrompt: requireElement<HTMLElement>("#confirmation-prompt"),
+  confirmationSafety: requireElement<HTMLElement>("#confirmation-safety"),
+  confirmationConfirm: requireElement<HTMLButtonElement>("#confirmation-confirm"),
 };
 
 const actionButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-action]"));
@@ -171,6 +192,7 @@ const vectors: Readonly<Record<string, ControlVector>> = CONTROL_VECTORS;
 
 const client = new CompanionConsoleClient({ url: consoleWebSocketUrl(), onState: render });
 const holdController = new ContinuousHoldController(client);
+const commandConfirmation = new DiscreteCommandConfirmation();
 
 refs.leaseAcquire.addEventListener("click", () => client.acquireLease());
 refs.leaseRenew.addEventListener("click", () => client.renewLease());
@@ -183,12 +205,45 @@ for (const button of actionButtons) {
   button.addEventListener("click", () => {
     const action = button.dataset.action;
     if (!isDiscreteAction(action)) return;
-    dispatchConfirmedCommand(action, window.confirm.bind(window), (confirmedAction) => {
-      holdController.clearPresentation();
-      client.sendCommand(confirmedAction);
-    });
+    const release = holdController.prepareCommandConfirmation();
+    if (release.hadActiveControl && release.neutralReceipt === null) return;
+    const pending = commandConfirmation.request(action, release.neutralReceipt);
+    if (pending === null) return;
+    refs.confirmationTitle.textContent = pending.title;
+    refs.confirmationPrompt.textContent = pending.prompt;
+    refs.confirmationConfirm.disabled = pending.awaitingNeutral;
+    refs.confirmationSafety.hidden = !pending.awaitingNeutral;
+    refs.confirmationSafety.textContent = pending.awaitingNeutral
+      ? "正在等待 server 確認 neutral；確認按鈕維持鎖定。"
+      : "";
+    try {
+      refs.confirmationDialog.showModal();
+    } catch {
+      // A missing/invalid modal surface must never dispatch a command.
+      commandConfirmation.cancel();
+    }
   });
 }
+
+refs.confirmationForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const submitter = (event as SubmitEvent).submitter;
+  if (!(submitter instanceof HTMLButtonElement) || submitter.value !== "confirm") {
+    closeCommandConfirmation("cancel");
+    return;
+  }
+  const action = commandConfirmation.confirm();
+  if (action === null) return;
+  refs.confirmationDialog.close("confirm");
+  if (!actuationReadiness(client.getState()).enabled) return;
+  holdController.clearPresentation();
+  client.sendCommand(action);
+});
+
+refs.confirmationDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeCommandConfirmation("cancel");
+});
 
 for (const button of holdButtons) {
   const vector = vectors[button.dataset.control ?? ""];
@@ -216,16 +271,19 @@ for (const button of holdButtons) {
 installGlobalHoldEndListeners(holdController, window, document);
 
 window.addEventListener("blur", () => {
+  closeCommandConfirmation("attention_lost");
   client.handleWindowBlur();
   holdController.clearPresentation();
 });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") {
+    closeCommandConfirmation("attention_lost");
     client.handleWindowBlur();
     holdController.clearPresentation();
   }
 });
 window.addEventListener("pagehide", () => {
+  closeCommandConfirmation("page_hide");
   holdController.clearPresentation();
   client.handlePageHide();
 });
@@ -239,6 +297,21 @@ client.start();
 function render(state: ConsoleViewState): void {
   const readiness = actuationReadiness(state);
   const connected = state.connectionPhase === "online";
+  const safety = state.lastSafetyEvent;
+  if (safety?.trigger === "client_request") {
+    const observation = commandConfirmation.observeNeutral(
+      safety.leaseId,
+      safety.lastInputSequence,
+      safety.outcome,
+    );
+    if (observation === "ready") {
+      refs.confirmationConfirm.disabled = false;
+      refs.confirmationSafety.hidden = false;
+      refs.confirmationSafety.textContent = "Server neutral 已確認；可送出離散命令。";
+    } else if (observation === "failed") {
+      closeCommandConfirmation("neutral_failed");
+    }
+  }
   refs.connectionPill.className = `status-pill status-pill--${connectionTone(state.connectionPhase)}`;
   refs.connectionLabel.textContent = connectionLabel(state.connectionPhase);
   refs.sessionLabel.textContent = state.sessionId ? `Session ${shortId(state.sessionId)}` : `Reconnect ${state.reconnectAttempt}`;
@@ -281,7 +354,10 @@ function render(state: ConsoleViewState): void {
     button.disabled = !readiness.enabled;
     button.title = readiness.enabled ? "" : readiness.reason;
   }
-  if (!readiness.enabled) holdController.clearPresentation();
+  if (!readiness.enabled) {
+    holdController.clearPresentation();
+    closeCommandConfirmation("blocked");
+  }
   renderCommandLog(state.commands);
   renderCapabilities(state);
 }
@@ -422,6 +498,14 @@ function commandLabel(action: CommandRequestPayload["action"]): string {
 
 function isDiscreteAction(value: string | undefined): value is CommandRequestPayload["action"] {
   return value === "takeoff" || value === "landing" || value === "return_to_home";
+}
+
+function closeCommandConfirmation(returnValue: string): void {
+  commandConfirmation.cancel();
+  refs.confirmationConfirm.disabled = false;
+  refs.confirmationSafety.hidden = true;
+  refs.confirmationSafety.textContent = "";
+  if (refs.confirmationDialog.open) refs.confirmationDialog.close(returnValue);
 }
 
 function requireElement<T extends Element>(selector: string): T {

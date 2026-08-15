@@ -35,11 +35,17 @@ object ConsoleRunnerProfile {
 data class ConsoleRunnerConfig(
     val webRoot: Path,
     val auditPath: Path,
+    val bindPort: Int,
 ) {
     companion object {
         fun from(args: Array<String>): ConsoleRunnerConfig {
-            require(args.size <= 2) { "usage: [web-console-dist] [audit-jsonl]" }
+            require(args.size <= 3) { "usage: [web-console-dist] [audit-jsonl] [loopback-port]" }
             val workingDirectory = Path.of("").toAbsolutePath().normalize()
+            val bindPort =
+                args.getOrNull(2)?.let { value ->
+                    requireNotNull(value.toIntOrNull()) { "loopback port must be numeric" }
+                } ?: ConsoleRunnerProfile.BIND_PORT
+            require(bindPort in 1..65_535) { "loopback port must be between 1 and 65535" }
             return ConsoleRunnerConfig(
                 webRoot =
                     workingDirectory.resolve(args.getOrNull(0) ?: "web-console/dist").normalize(),
@@ -47,6 +53,7 @@ data class ConsoleRunnerConfig(
                     workingDirectory.resolve(
                         args.getOrNull(1) ?: ".drone-agent-companion/audit/console-events.jsonl",
                     ).normalize(),
+                bindPort = bindPort,
             )
         }
     }
@@ -101,7 +108,7 @@ fun main(args: Array<String>) {
         KtorConsoleServer(
             ConsoleServerConfig(
                 bindHost = ConsoleRunnerProfile.BIND_HOST,
-                bindPort = ConsoleRunnerProfile.BIND_PORT,
+                bindPort = config.bindPort,
                 webRoot = config.webRoot,
             ),
             controller,
@@ -144,7 +151,7 @@ fun main(args: Array<String>) {
         agent.telemetry.start()
         println(
             "[console-runner] adapter=mock profile=localhost_development " +
-                "http://${ConsoleRunnerProfile.BIND_HOST}:${ConsoleRunnerProfile.BIND_PORT}",
+                "http://${ConsoleRunnerProfile.BIND_HOST}:${config.bindPort}",
         )
         println("[console-runner] audit=${config.auditPath}")
         server.start(wait = true)

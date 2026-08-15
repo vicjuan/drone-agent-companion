@@ -1,4 +1,7 @@
-import type { ControlVector } from "./console-client.js";
+import type {
+  ControlNeutralReceipt,
+  ControlVector,
+} from "./console-client.js";
 
 export type HoldActivationKey = " " | "Enter";
 
@@ -14,8 +17,14 @@ export interface HoldPresentationTarget {
 export interface ContinuousControlPort {
   beginControl(vector: ControlVector): boolean;
   releaseControl(): boolean;
+  releaseControlForCommandConfirmation(): ControlNeutralReceipt | null;
   cancelControl(): boolean;
   lostPointerCapture(): boolean;
+}
+
+export interface CommandConfirmationRelease {
+  readonly hadActiveControl: boolean;
+  readonly neutralReceipt: ControlNeutralReceipt | null;
 }
 
 export type PointerHoldEnding = "release" | "cancel" | "lost_capture";
@@ -103,6 +112,23 @@ export class ContinuousHoldController<TTarget extends HoldPresentationTarget> {
     target.classList.remove("is-active");
     this.port.releaseControl();
     return true;
+  }
+
+  /**
+   * Consumes the active UI token, stops the client interval and requests a
+   * neutral before a modal can cover the continuous-control surface.
+   */
+  prepareCommandConfirmation(): CommandConfirmationRelease {
+    const hadActiveControl =
+      this.activePointer !== null || this.activeKeyboardTarget !== null;
+    this.clearPresentation();
+    if (!hadActiveControl) {
+      return { hadActiveControl: false, neutralReceipt: null };
+    }
+    return {
+      hadActiveControl: true,
+      neutralReceipt: this.port.releaseControlForCommandConfirmation(),
+    };
   }
 
   clearPresentation(): void {

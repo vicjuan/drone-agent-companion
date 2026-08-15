@@ -514,6 +514,59 @@ dd {
   color: #f5a19b;
 }
 
+.button--danger {
+  border-color: rgba(255, 119, 111, 0.42);
+  background: var(--danger-soft);
+  color: #ffaaa5;
+}
+
+.confirmation-dialog {
+  width: min(92vw, 470px);
+  padding: 0;
+  border: 1px solid rgba(240, 183, 94, 0.42);
+  border-radius: 16px;
+  background: #0b1714;
+  color: var(--text);
+  box-shadow: 0 26px 80px rgba(0, 0, 0, 0.58);
+}
+
+.confirmation-dialog::backdrop {
+  background: rgba(2, 8, 7, 0.78);
+  backdrop-filter: blur(4px);
+}
+
+.confirmation-card {
+  padding: 24px;
+}
+
+.confirmation-prompt {
+  margin: 14px 0 22px;
+  color: var(--muted-strong);
+  font-size: 0.82rem;
+  line-height: 1.65;
+}
+
+.confirmation-safety {
+  margin: -10px 0 20px;
+  padding: 9px 10px;
+  border: 1px solid rgba(90, 224, 170, 0.26);
+  border-radius: 8px;
+  background: var(--mint-soft);
+  color: var(--mint-strong);
+  font-size: 0.7rem;
+  line-height: 1.45;
+}
+
+.confirmation-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.confirmation-actions .button {
+  min-height: 42px;
+}
+
 .command-section,
 .hold-section {
   padding: 16px 18px 17px;

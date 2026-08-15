@@ -13,6 +13,7 @@ dependencies {
     testImplementation(project(":capability-matrix"))
     testImplementation(libs.ktor.server.test.host)
     testImplementation(libs.ktor.client.websockets)
+    testImplementation(libs.kotlinx.serialization.json)
     testImplementation(libs.junit)
 }
 

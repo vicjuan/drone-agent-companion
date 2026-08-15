@@ -68,6 +68,16 @@ Then open <http://127.0.0.1:8080>. The Gradle task installs and builds the SPA b
 server. The runner binds only to loopback and records audit events in
 `.drone-agent-companion/audit/console-events.jsonl`.
 
+If `8080` is already occupied, the optional third runner argument may select another loopback
+port without widening the bind address:
+
+```bash
+./gradlew :console-runner:run --args='web-console/dist .drone-agent-companion/audit/console-events.jsonl 18081'
+```
+
+Open the matching URL (for example <http://127.0.0.1:18081>); the WebSocket Origin gate follows
+that exact loopback port.
+
 The browser shows the actual runtime adapter, connection and actuation-lock state. Takeoff,
 landing and RTH require confirmation; the six continuous directions use press-and-hold controls
 with server-side lease, TTL, dead-man and neutral enforcement. Mock RTH is a companion-owned,

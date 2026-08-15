@@ -265,6 +265,33 @@ test("duplicate hold endings emit exactly one neutral and leave no control inter
   assert.equal(fixture.scheduler.activeIntervals().length, 0);
 });
 
+test("command confirmation stops held frames and exposes the neutral sequence", () => {
+  const fixture = harness();
+  const socket = bringOnline(fixture);
+
+  assert.equal(fixture.client.beginControl(CONTROL_VECTORS.forward), true);
+  assert.equal(fixture.scheduler.activeIntervals().length, 1);
+  assert.deepEqual(fixture.client.releaseControlForCommandConfirmation(), {
+    leaseId: "lease-client-1",
+    inputSequence: 2,
+  });
+  assert.equal(fixture.scheduler.activeIntervals().length, 0);
+  fixture.scheduler.tickIntervals();
+  assert.equal(fixture.client.releaseControlForCommandConfirmation(), null);
+
+  const controls = sentMessages(socket).filter((message) =>
+    ["control_frame", "control_neutral"].includes(message.type),
+  );
+  assert.deepEqual(
+    controls.map((message) => [message.type, message.payload.inputSequence]),
+    [
+      ["control_frame", 1],
+      ["control_neutral", 2],
+    ],
+  );
+  assert.equal(controls[1]?.payload.reason, "operator_release");
+});
+
 test("blur and pagehide neutralize even an idle owned lease and pagehide prevents reconnect", () => {
   const fixture = harness();
   const socket = bringOnline(fixture);

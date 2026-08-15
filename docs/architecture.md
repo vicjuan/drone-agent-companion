@@ -127,7 +127,8 @@ closed-loop-not-executed guard）隨 submodule 一併生效，CI 必須執行。
    `CommandAdmissionPolicy` 與 authority/audit 路徑，不存在繞過 admission 的
    HTTP 或 WebSocket 致動端點。
 2. **Mock 可執行不等於真機可執行。** Weekend MVP 允許 takeoff、landing、RTH 與
-   virtual-stick 命令在 `adapter-mock` 下端到端執行。真機啟動時預設鎖住致動，
+   virtual-stick 命令在 mock composition 下端到端執行；takeoff、landing 與
+   virtual-stick 終止於上游 `adapter-mock`。真機啟動時預設鎖住致動，
    只能由明確的 hardware commissioning session 逐項開放並產生第一手證據；一般
    operational profile 不得把 `UNKNOWN` 當作已確認能力。目前 mock RTH 是
    companion-owned、可觀察的 simulation port，會讓 mock telemetry 顯示

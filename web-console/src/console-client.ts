@@ -27,6 +27,11 @@ export interface ControlVector {
   readonly yaw: number;
 }
 
+export interface ControlNeutralReceipt {
+  readonly leaseId: string;
+  readonly inputSequence: number;
+}
+
 export const CONTROL_VECTORS = Object.freeze({
   forward: Object.freeze({ forward: 1, right: 0, up: 0, yaw: 0 }),
   backward: Object.freeze({ forward: -1, right: 0, up: 0, yaw: 0 }),
@@ -247,19 +252,27 @@ export class CompanionConsoleClient {
   }
 
   releaseControl(): boolean {
+    return this.neutralizeControl("operator_release", false) !== null;
+  }
+
+  /**
+   * Stops a held input before an operator confirmation opens and returns the
+   * sequence whose safety completion must be observed before dispatch.
+   */
+  releaseControlForCommandConfirmation(): ControlNeutralReceipt | null {
     return this.neutralizeControl("operator_release", false);
   }
 
   cancelControl(): boolean {
-    return this.neutralizeControl("pointer_cancel", false);
+    return this.neutralizeControl("pointer_cancel", false) !== null;
   }
 
   lostPointerCapture(): boolean {
-    return this.neutralizeControl("pointer_cancel", false);
+    return this.neutralizeControl("pointer_cancel", false) !== null;
   }
 
   handleWindowBlur(): boolean {
-    return this.neutralizeControl("window_blur", true);
+    return this.neutralizeControl("window_blur", true) !== null;
   }
 
   handlePageHide(): void {
@@ -411,22 +424,22 @@ export class CompanionConsoleClient {
   private neutralizeControl(
     reason: ControlNeutralPayload["reason"],
     evenWhenIdle: boolean,
-  ): boolean {
+  ): ControlNeutralReceipt | null {
     const hadActiveControl = this.activeControl !== null;
     this.clearControlInterval();
     this.activeControl = null;
-    if (!hadActiveControl && !evenWhenIdle) return false;
+    if (!hadActiveControl && !evenWhenIdle) return null;
     const leaseId = this.ownedLeaseId();
-    if (leaseId === null || !this.isProtocolOnline()) return false;
+    if (leaseId === null || !this.isProtocolOnline()) return null;
     const inputSequence = this.nextControlSequence(leaseId);
-    if (inputSequence === null) return false;
+    if (inputSequence === null) return null;
     const message: ConsoleEnvelope<"control_neutral"> = {
       protocolVersion: CONSOLE_PROTOCOL_VERSION,
       messageId: this.idFactory(),
       type: "control_neutral",
       payload: { leaseId, inputSequence, reason },
     };
-    return this.send(message);
+    return this.send(message) ? { leaseId, inputSequence } : null;
   }
 
   private nextControlSequence(leaseId: string): number | null {

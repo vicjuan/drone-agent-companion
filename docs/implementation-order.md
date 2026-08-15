@@ -9,8 +9,9 @@
 垂直切片：
 
 > 在 Mac 上啟動 `console-runner`，瀏覽器可看見即時 mock telemetry，並可透過
-> 完整 admission → authority → audit → adapter 路徑操作 takeoff、landing、RTH、
-> 上升／下降、前進／後退、左旋／右旋。
+> 完整 admission → authority → audit 路徑操作 takeoff、landing、RTH、上升／下降、
+> 前進／後退、左旋／右旋。takeoff、landing 與連續控制終止於上游 `adapter-mock`；
+> 因上游沒有 RTH action port，RTH 明確終止於 companion-owned observable simulation。
 
 排序原則是先做出這條可見的 end-to-end slice，再補 Android host、產品化認證、影像
 與維運。帳號、密碼、TLS、credential lifecycle、多使用者管理都不屬於週末 MVP。
@@ -157,7 +158,8 @@ Ktor Android 仍未驗證。
 WebSocket 連線、收到 mock telemetry，且 mock adapter 能回傳命令 ack／result。
 
 **2026-08-15 實作狀態**：Mac composition root 已接上 `adapter-mock`、runtime readiness、
-telemetry、audit 與 Ktor，固定 `127.0.0.1:8080`。上游 mock 沒有 RTH action port，
+telemetry、audit 與 Ktor，預設 `127.0.0.1:8080`；可只改 loopback port 以避開本機占用，
+bind host 仍不可改。上游 mock 沒有 RTH action port，
 因此 runner 以 companion-owned observable simulation seam 顯示 `RETURNING_HOME`；此路徑
 只是 demo 可觀察性，不是 DJI/G520 RTH 證據。
 
@@ -177,14 +179,21 @@ matrix 標 `UNKNOWN` 的能力仍需如實呈現，且 mock runtime 不得顯示
 resources 內嵌，單一產物即可服務。
 
 **Weekend MVP 完成判準**：mock 下瀏覽器可看到即時更新；上述命令全部經完整
-admission → authority → audit → adapter 路徑執行並收到結果；第二個 browser client
-不能取得同一 control lease；斷線有明確 UI 狀態並自動重連；server 可觀察到 neutral。
+admission → authority → audit 路徑到達明定的 mock terminal 並收到結果（RTH terminal
+是 companion simulation，不冒充 upstream adapter）；第二個 browser client 不能取得
+同一 control lease；斷線有明確 UI 狀態並自動重連；server 可觀察到 neutral。
 
 **2026-08-15 實作狀態**：SPA 已顯示 runtime/health/telemetry/capability/lease，
 並提供需確認的 takeoff/landing/RTH 與六向 press-and-hold。release、cancel、
 pointer-capture 失敗、鍵盤焦點轉移、window blur、visibility/pagehide 都匯入
 同一個 idempotent neutral 路徑；protocol error 會鎖住當前 session 並重連。UI 狀態
 保留 `UNKNOWN` capability，也不會把 targeted lease denial 誤當全域 lease truth。
+
+**2026-08-16 browser acceptance**：Windows 筆電常見的 1366×768 viewport 已由真實瀏覽器
+連上 loopback runner 驗證。TAKEOFF／LANDING／RTH 使用頁內 modal 明確確認；取消不會
+dispatch，確認後 UI 會顯示 ack/result。六向控制全數收到 `APPLIED`，每次釋放都收到
+neutral `SUCCEEDED`；第二個 browser session 在 lease 已持有時維持 blocked，釋放後同步
+恢復可取得。17 列 target-stack capability 仍全為 `UNKNOWN`。
 
 ### S6　點對點 Ethernet commissioning profile（issue #6）
 

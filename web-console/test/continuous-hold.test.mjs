@@ -51,6 +51,7 @@ function fakeTarget({ captureThrows = false, disabled = false } = {}) {
 
 function harness() {
   const calls = [];
+  let confirmationSequence = 40;
   const port = {
     beginControl(vector) {
       calls.push({ type: "begin", vector });
@@ -59,6 +60,11 @@ function harness() {
     releaseControl() {
       calls.push({ type: "release" });
       return true;
+    },
+    releaseControlForCommandConfirmation() {
+      confirmationSequence += 1;
+      calls.push({ type: "confirmation_release", sequence: confirmationSequence });
+      return { leaseId: "lease-held", inputSequence: confirmationSequence };
     },
     cancelControl() {
       calls.push({ type: "cancel" });
@@ -158,4 +164,24 @@ test("document pointercancel matches only the active pointer id", () => {
   assert.equal(controller.endPointer(7, "cancel"), true);
   assert.equal(controller.endPointer(7, "release"), false);
   assert.deepEqual(calls.map(({ type }) => type), ["begin", "cancel"]);
+});
+
+test("opening command confirmation consumes a hold and requests one neutral", () => {
+  const { calls, controller } = harness();
+  const button = fakeTarget();
+
+  assert.equal(controller.beginPointer(button, 12, CONTROL_VECTORS.forward), true);
+  assert.deepEqual(controller.prepareCommandConfirmation(), {
+    hadActiveControl: true,
+    neutralReceipt: { leaseId: "lease-held", inputSequence: 41 },
+  });
+  assert.equal(button.classes.has("is-active"), false);
+  assert.equal(controller.endPointer(12, "release"), false);
+  assert.deepEqual(calls.map(({ type }) => type), ["begin", "confirmation_release"]);
+
+  assert.deepEqual(controller.prepareCommandConfirmation(), {
+    hadActiveControl: false,
+    neutralReceipt: null,
+  });
+  assert.deepEqual(calls.map(({ type }) => type), ["begin", "confirmation_release"]);
 });

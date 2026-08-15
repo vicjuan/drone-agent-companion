@@ -14,18 +14,35 @@ class ConsoleRunnerProfileTest {
 
     @Test
     fun `runner arguments can select artifacts but cannot widen the bind surface`() {
-        val config = ConsoleRunnerConfig.from(arrayOf("web-output", "state/audit.jsonl"))
+        val config = ConsoleRunnerConfig.from(arrayOf("web-output", "state/audit.jsonl", "18081"))
 
         assertTrue(config.webRoot.isAbsolute)
         assertTrue(config.webRoot.endsWith("web-output"))
         assertTrue(config.auditPath.endsWith("state/audit.jsonl"))
+        assertEquals(18081, config.bindPort)
         assertEquals("127.0.0.1", ConsoleRunnerProfile.BIND_HOST)
     }
 
     @Test
-    fun `runner rejects unknown positional arguments`() {
+    fun `runner keeps the default loopback port when no override is supplied`() {
+        val config = ConsoleRunnerConfig.from(emptyArray())
+
+        assertEquals(ConsoleRunnerProfile.BIND_PORT, config.bindPort)
+    }
+
+    @Test
+    fun `runner rejects a non-numeric bind surface or an invalid port`() {
         assertThrows(IllegalArgumentException::class.java) {
             ConsoleRunnerConfig.from(arrayOf("web", "audit", "0.0.0.0"))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ConsoleRunnerConfig.from(arrayOf("web", "audit", "0"))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ConsoleRunnerConfig.from(arrayOf("web", "audit", "65536"))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ConsoleRunnerConfig.from(arrayOf("web", "audit", "18081", "unexpected"))
         }
     }
 }
