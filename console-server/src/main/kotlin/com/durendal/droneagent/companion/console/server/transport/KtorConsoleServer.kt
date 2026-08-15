@@ -1,5 +1,8 @@
 package com.durendal.droneagent.companion.console.server.transport
 
+import com.durendal.droneagent.companion.console.server.security.ConsoleExposure
+import com.durendal.droneagent.companion.console.server.security.ConsoleExposurePolicy
+import com.durendal.droneagent.companion.console.server.security.ConsoleExposureProfile
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -22,7 +25,6 @@ import io.ktor.websocket.Frame
 import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import io.ktor.websocket.send
-import java.net.InetAddress
 import java.net.HttpURLConnection
 import java.net.Proxy
 import java.net.URL
@@ -39,38 +41,79 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 
-data class ConsoleServerConfig(
-    val bindHost: String,
-    val bindPort: Int,
-    val webRoot: Path,
-    val maxTextFrameBytes: Int = 64 * 1024,
-    val allowedBrowserOrigin: String = browserOrigin("http", bindHost, bindPort),
-    val startupTimeoutMillis: Long = 10_000L,
-    val startupProbeToken: String = UUID.randomUUID().toString(),
-) {
+sealed interface ConsoleServerConfig {
+    val exposureProfile: ConsoleExposureProfile
+    val bindHost: String
+    val bindPort: Int
+    val webRoot: Path
+    val maxTextFrameBytes: Int
+    val allowedBrowserOrigin: String
+    val startupTimeoutMillis: Long
+    val startupProbeToken: String
+    val expectedRemotePeerIpv4: String?
+    val runtimeNetworkId: String?
+
+    fun acceptsRemoteAddress(
+        remoteAddress: String,
+        requestPath: String,
+    ): Boolean
+
+    companion object {
+        fun create(
+            exposure: ConsoleExposure,
+            webRoot: Path,
+            maxTextFrameBytes: Int = 64 * 1024,
+            startupTimeoutMillis: Long = 10_000L,
+            startupProbeToken: String = UUID.randomUUID().toString(),
+        ): ConsoleServerConfig =
+            PolicyBoundConsoleServerConfig(
+                exposure = exposure,
+                webRoot = webRoot,
+                maxTextFrameBytes = maxTextFrameBytes,
+                startupTimeoutMillis = startupTimeoutMillis,
+                startupProbeToken = startupProbeToken,
+            )
+    }
+}
+
+private class PolicyBoundConsoleServerConfig(
+    private val exposure: ConsoleExposure,
+    override val webRoot: Path,
+    override val maxTextFrameBytes: Int,
+    override val startupTimeoutMillis: Long,
+    override val startupProbeToken: String,
+) : ConsoleServerConfig {
+    override val exposureProfile: ConsoleExposureProfile = exposure.profile
+    override val bindHost: String = exposure.bindHost
+    override val bindPort: Int = exposure.bindPort
+    override val allowedBrowserOrigin: String = exposure.allowedBrowserOrigin
+    override val expectedRemotePeerIpv4: String? = exposure.expectedRemotePeerIpv4
+    override val runtimeNetworkId: String? = exposure.runtimeNetworkId
+
     init {
-        require(bindHost.isNotBlank()) { "bindHost must not be blank" }
-        require(!resolveBindAddress(bindHost).isAnyLocalAddress) {
-            "Wildcard bind hosts are forbidden; select loopback or one commissioning interface"
-        }
-        require(bindPort in 0..65_535) { "bindPort must be between 0 and 65535" }
-        require(maxTextFrameBytes in 1..MAX_ALLOWED_TEXT_FRAME_BYTES) {
-            "maxTextFrameBytes must be between 1 and $MAX_ALLOWED_TEXT_FRAME_BYTES"
+        require(maxTextFrameBytes in 1..MAX_CONSOLE_TEXT_FRAME_BYTES) {
+            "maxTextFrameBytes must be between 1 and $MAX_CONSOLE_TEXT_FRAME_BYTES"
         }
         require(startupTimeoutMillis in 100L..60_000L) {
             "startupTimeoutMillis must be between 100 and 60000"
         }
-        require(STARTUP_PROBE_TOKEN.matches(startupProbeToken)) {
+        require(CONSOLE_STARTUP_PROBE_TOKEN.matches(startupProbeToken)) {
             "startupProbeToken must be a bounded opaque identifier"
         }
         requireCanonicalBrowserOrigin(allowedBrowserOrigin)
     }
 
-    private companion object {
-        const val MAX_ALLOWED_TEXT_FRAME_BYTES = 1024 * 1024
-        val STARTUP_PROBE_TOKEN = Regex("^[A-Za-z0-9_-]{16,64}$")
-    }
+    override fun acceptsRemoteAddress(
+        remoteAddress: String,
+        requestPath: String,
+    ): Boolean =
+        ConsoleExposurePolicy.acceptsRemoteAddress(exposure, remoteAddress) ||
+            (requestPath == ConsoleRoutes.READINESS && remoteAddress == bindHost)
+
 }
+
+private const val MAX_CONSOLE_TEXT_FRAME_BYTES = 1024 * 1024
+private val CONSOLE_STARTUP_PROBE_TOKEN = Regex("^[A-Za-z0-9_-]{16,64}$")
 
 interface ConsoleFrameSink {
     /** Returns false when transport backpressure has made the session unusable. */
@@ -230,10 +273,25 @@ fun Application.installConsoleApplication(
         call.response.headers.append(X_CONTENT_TYPE_OPTIONS_HEADER, "nosniff")
         call.response.headers.append(REFERRER_POLICY_HEADER, "no-referrer")
 
+        // Defence in depth for the runnable localhost listener. Ktor connection metadata is not
+        // authentication; commissioning cannot create a ConsoleServerConfig until a future live
+        // Android Network pinner and inventory-freshness gate exist. This application installs no
+        // forwarded-header plugin, so headers cannot widen the current loopback filter.
+        val requestPath = call.request.path()
+        if (!config.acceptsRemoteAddress(call.request.local.remoteAddress, requestPath)) {
+            call.respondText(
+                text = "Console peer rejected",
+                contentType = ContentType.Text.Plain,
+                status = HttpStatusCode.Forbidden,
+            )
+            finish()
+            return@intercept
+        }
+
         // Reject cross-site WebSocket attempts before Ktor performs the protocol upgrade. Browser
         // clients always send Origin; accepting a missing or ambiguous value would turn the
         // unauthenticated commissioning endpoint into a cross-site command surface.
-        if (call.request.path() == ConsoleRoutes.WEBSOCKET && !call.hasExactBrowserOrigin(config)) {
+        if (requestPath == ConsoleRoutes.WEBSOCKET && !call.hasExactBrowserOrigin(config)) {
             call.respondText(
                 text = "WebSocket origin rejected",
                 contentType = ContentType.Text.Plain,
@@ -392,12 +450,6 @@ private data class SafeStaticRoot(
     val lexicalPath: Path,
     val realPath: Path,
 )
-
-private fun resolveBindAddress(bindHost: String): InetAddress {
-    val normalizedHost = bindHost.removeSurrounding("[", "]")
-    return runCatching { InetAddress.getByName(normalizedHost) }
-        .getOrElse { throw IllegalArgumentException("bindHost must resolve to one interface", it) }
-}
 
 private fun io.ktor.server.application.ApplicationCall.hasExactBrowserOrigin(
     config: ConsoleServerConfig,

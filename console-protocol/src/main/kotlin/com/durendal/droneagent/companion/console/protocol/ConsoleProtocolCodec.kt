@@ -32,6 +32,9 @@ class ConsoleProtocolException(
             ProtocolErrorCode.WRONG_MESSAGE_DIRECTION -> "Message type is not valid in this direction."
             ProtocolErrorCode.INVALID_PAYLOAD -> "Payload does not match the message schema."
             ProtocolErrorCode.HANDSHAKE_REQUIRED -> "Client hello must complete before this message."
+            ProtocolErrorCode.AUTHENTICATION_REQUIRED -> "Authentication is required for this session."
+            ProtocolErrorCode.AUTHENTICATION_FAILED -> "Authentication failed."
+            ProtocolErrorCode.AUTHORIZATION_FAILED -> "The authenticated role is not authorized for this message."
             ProtocolErrorCode.UNEXPECTED_MESSAGE -> "Message is not valid in the current session state."
             ProtocolErrorCode.SERVER_UNAVAILABLE -> "Server could not safely process the message."
         }

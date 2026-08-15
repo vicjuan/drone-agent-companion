@@ -54,6 +54,41 @@ class FileConsoleAuditSinkTest {
     }
 
     @Test
+    fun `authentication and authorization audit kinds serialize without credential fields`() {
+        val path = Files.createTempDirectory("console-auth-audit").resolve("events.jsonl")
+        FileConsoleAuditSink(path).use { sink ->
+            sink.record(
+                event(
+                    kind = ConsoleAuditKind.AUTHENTICATION_SUCCEEDED,
+                    outcome = "succeeded",
+                    detail = "role=operator",
+                ),
+            )
+            sink.record(
+                event(
+                    kind = ConsoleAuditKind.AUTHENTICATION_FAILED,
+                    outcome = "failed",
+                    detail = null,
+                ),
+            )
+            sink.record(
+                event(
+                    kind = ConsoleAuditKind.AUTHORIZATION_REFUSED,
+                    outcome = "refused",
+                    detail = "message_type=lease_acquire",
+                ),
+            )
+        }
+
+        val text = Files.readString(path)
+        assertTrue(text.contains("\"kind\":\"authentication_succeeded\""))
+        assertTrue(text.contains("\"kind\":\"authentication_failed\""))
+        assertTrue(text.contains("\"kind\":\"authorization_refused\""))
+        assertFalse(text.contains("credential", ignoreCase = true))
+        assertFalse(text.contains("token", ignoreCase = true))
+    }
+
+    @Test
     fun `audit destination symlink is rejected`() {
         val directory = Files.createTempDirectory("console-audit")
         val target = directory.resolve("target.jsonl")

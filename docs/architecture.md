@@ -176,6 +176,9 @@ G520 Android 上驗證固定 IP、指定介面 bind、開機可達性與 WebSock
 1. **MediaMTX 位置**：G520 機上（aarch64 binary 可行性）vs 地面站筆電。
 2. **USB 權限策略**：system/priv-app 自動授權 vs 一次性人工授權後記憶。
 3. **web console 產品化認證與傳輸安全**：區網 TLS（自簽憑證）與 token 佈建方式。
+   第一個 fail-closed admission kernel 與尚未完成的 production gate 記錄於
+   [`production-web-console-security.md`](production-web-console-security.md)；shared/routable
+   profile 在 TLS、credential lifecycle 與 session revocation 完成前仍不可啟動。
 4. **OpenCV 實作選型**：Android distribution／native packaging 方式與第一個可驗收的
    visual-recognition target（#14）；使用 OpenCV 本身已定案。
 5. **G520 fresh-install 第一次啟用**：emulator 可由同 candidate 的 test instrumentation

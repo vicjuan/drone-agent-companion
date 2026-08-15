@@ -1,5 +1,6 @@
 package com.durendal.droneagent.companion.console.server.transport
 
+import com.durendal.droneagent.companion.console.server.security.ConsoleExposurePolicy
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.client.request.get
@@ -19,6 +20,8 @@ import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.URL
+import java.lang.reflect.Modifier
+import java.lang.reflect.Proxy
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Assert.assertEquals
@@ -38,9 +41,8 @@ class KtorConsoleServerTest {
         repeat(2) {
             val server =
                 KtorConsoleServer(
-                    ConsoleServerConfig(
-                        bindHost = "127.0.0.1",
-                        bindPort = port,
+                    ConsoleServerConfig.create(
+                        exposure = ConsoleExposurePolicy.localhostDevelopment(port),
                         webRoot = webRoot,
                         startupTimeoutMillis = 2_000L,
                     ),
@@ -68,9 +70,8 @@ class KtorConsoleServerTest {
         occupied.use { socket ->
             val server =
                 KtorConsoleServer(
-                    ConsoleServerConfig(
-                        bindHost = "127.0.0.1",
-                        bindPort = socket.localPort,
+                    ConsoleServerConfig.create(
+                        exposure = ConsoleExposurePolicy.localhostDevelopment(socket.localPort),
                         webRoot = Files.createTempDirectory("console-port-collision"),
                         startupTimeoutMillis = 2_000L,
                     ),
@@ -83,27 +84,23 @@ class KtorConsoleServerTest {
     }
 
     @Test
-    fun `wildcard bind is rejected before an engine can expose the console`() {
-        for (
-            host in
-                listOf(
-                    "0.0.0.0",
-                    "0",
-                    "::",
-                    "::0",
-                    "[::]",
-                    "0:0:0:0:0:0:0:0",
-                    "[0:0:0:0:0:0:0:0]",
-                    "*",
-                )
-        ) {
-            assertThrows(IllegalArgumentException::class.java) {
-                ConsoleServerConfig(
-                    bindHost = host,
-                    bindPort = 8080,
-                    webRoot = Path.of("web-console/dist"),
-                )
-            }
+    fun `config has no public constructor or data-class copy endpoint bypass`() {
+        val config =
+            ConsoleServerConfig.create(
+                exposure = ConsoleExposurePolicy.localhostDevelopment(8080),
+                webRoot = Path.of("web-console/dist"),
+            )
+
+        assertTrue(ConsoleServerConfig::class.java.isSealed)
+        assertTrue(ConsoleServerConfig::class.java.constructors.isEmpty())
+        assertFalse(ConsoleServerConfig::class.java.methods.any { it.name == "copy" })
+        assertFalse(Modifier.isPublic(config.javaClass.modifiers))
+        assertFalse(config.javaClass.methods.any { it.name == "copy" || it.name.startsWith("component") })
+        assertThrows(IllegalArgumentException::class.java) {
+            Proxy.newProxyInstance(
+                ConsoleServerConfig::class.java.classLoader,
+                arrayOf(ConsoleServerConfig::class.java),
+            ) { _, _, _ -> null }
         }
     }
 
@@ -134,7 +131,7 @@ class KtorConsoleServerTest {
             val csp = checkNotNull(response.headers["Content-Security-Policy"])
             assertTrue(csp.contains("frame-ancestors 'none'"))
             assertTrue(csp.contains("default-src 'self'"))
-            assertTrue(csp.contains("connect-src 'self' ws://127.0.0.1:0"))
+            assertTrue(csp.contains("connect-src 'self' ws://127.0.0.1:8080"))
             assertEquals("DENY", response.headers["X-Frame-Options"])
         }
         assertEquals(HttpStatusCode.NotFound, client.post("/api/command").status)
@@ -239,7 +236,7 @@ class KtorConsoleServerTest {
                     emptyList(),
                     listOf("null"),
                     listOf("https://attacker.example"),
-                    listOf("http://127.0.0.1:8080"),
+                    listOf("http://127.0.0.1:0"),
                     listOf(TEST_BROWSER_ORIGIN, TEST_BROWSER_ORIGIN),
                     listOf(TEST_BROWSER_ORIGIN, "https://attacker.example"),
                 )
@@ -276,16 +273,18 @@ class KtorConsoleServerTest {
         }
 
     private fun config(webRoot: Path): ConsoleServerConfig =
-        ConsoleServerConfig(
-            bindHost = "127.0.0.1",
-            bindPort = 0,
+        ConsoleServerConfig.create(
+            exposure =
+                ConsoleExposurePolicy.localhostDevelopment(
+                    bindPort = 0,
+                    browserPort = 8080,
+                ),
             webRoot = webRoot,
             maxTextFrameBytes = 1024,
-            allowedBrowserOrigin = TEST_BROWSER_ORIGIN,
         )
 
     private companion object {
-        const val TEST_BROWSER_ORIGIN = "http://127.0.0.1:0"
+        const val TEST_BROWSER_ORIGIN = "http://127.0.0.1:8080"
     }
 
     private class RecordingController(

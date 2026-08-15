@@ -118,6 +118,9 @@ fun interface ConsoleEventSink {
 }
 
 enum class ConsoleAuditKind {
+    AUTHENTICATION_SUCCEEDED,
+    AUTHENTICATION_FAILED,
+    AUTHORIZATION_REFUSED,
     SESSION_OPENED,
     SESSION_DISCONNECTED,
     LEASE_ACQUIRED,

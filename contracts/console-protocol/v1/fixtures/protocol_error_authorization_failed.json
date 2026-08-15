@@ -1,0 +1,10 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-protocol-error-authorization-001",
+  "type": "protocol_error",
+  "payload": {
+    "relatedMessageId": "fixture-lease-acquire-001",
+    "code": "authorization_failed",
+    "detail": "The authenticated role is not authorized for this message."
+  }
+}

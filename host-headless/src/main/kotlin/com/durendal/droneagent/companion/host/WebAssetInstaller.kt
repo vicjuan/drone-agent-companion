@@ -272,7 +272,7 @@ class WebAssetInstaller private constructor(
                     packaged("assets/capability-matrix.js", "e97b8c6ba9ab022613999b7fba9e08a8dab92df1f12e484ce9740921cba52116"),
                     packaged("assets/console-actions.js", "8894e3f63a1d048a2ef6523a818cdc4a7c42a5b637ea11acc77553950683e369"),
                     packaged("assets/console-client.js", "ca23d8365c5bbb36826bf93e6b942de13bc80a197b9c22bb3c57849e29185815"),
-                    packaged("assets/console-protocol.js", "372c1e9ae4fd56180cb488b44acd7d4cf76e2719dad0d5a8ec89c0a3f718c247"),
+                    packaged("assets/console-protocol.js", "1521b255c4273c83b65b12f330f2343d8a097381bf1043d3b1d7dda7f281d77a"),
                     packaged("assets/console-state.js", "e3170479ece749c304696505e8900745faf6dc9050e37334ee2cf0eea5dd7058"),
                     packaged("assets/continuous-hold.js", "4364a496a64da3314eff875bb9df7fa568e487da21d7b5c661877add8988c243"),
                     packaged("assets/main.js", "a62d9bf23921d69d6a0f986c6d2d9f2f23b40488712cbab8a73438e54cae01ed"),

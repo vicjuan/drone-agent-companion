@@ -27,7 +27,6 @@ import com.durendal.droneagent.companion.console.protocol.SafetyAction
 import com.durendal.droneagent.companion.console.protocol.SafetyEventPayload
 import com.durendal.droneagent.companion.console.protocol.SafetyOutcome
 import com.durendal.droneagent.companion.console.protocol.SafetyTrigger
-import com.durendal.droneagent.companion.console.protocol.ServerHelloPayload
 import com.durendal.droneagent.companion.console.protocol.TelemetryPayload
 import com.durendal.droneagent.companion.console.server.ConsoleCommandDecision
 import com.durendal.droneagent.companion.console.server.ConsoleCommandOutcome
@@ -35,14 +34,20 @@ import com.durendal.droneagent.companion.console.server.ConsoleControlFrame
 import com.durendal.droneagent.companion.console.server.ConsoleControlNeutral
 import com.durendal.droneagent.companion.console.server.ConsoleControlStatus
 import com.durendal.droneagent.companion.console.server.ConsoleCoreEvent
+import com.durendal.droneagent.companion.console.server.ConsoleAuditSink
+import com.durendal.droneagent.companion.console.server.ConsoleEpochClock
 import com.durendal.droneagent.companion.console.server.ConsoleDiscreteAction
 import com.durendal.droneagent.companion.console.server.ConsoleDiscreteCommand
 import com.durendal.droneagent.companion.console.server.ConsoleEventSink
 import com.durendal.droneagent.companion.console.server.ConsoleLeaseState
 import com.durendal.droneagent.companion.console.server.ConsoleLeaseStatus
 import com.durendal.droneagent.companion.console.server.ConsoleNeutralRequestReason
+import com.durendal.droneagent.companion.console.server.ConsoleMonotonicClock
 import com.durendal.droneagent.companion.console.server.ConsoleSafetyTrigger
 import com.durendal.droneagent.companion.console.server.ConsoleServerCore
+import com.durendal.droneagent.companion.console.server.security.AuthenticatingConsoleClientSessionHandler
+import com.durendal.droneagent.companion.console.server.security.ConsoleBearerTokenVerifier
+import com.durendal.droneagent.companion.console.server.security.ConsoleHandshakeSecurity
 
 /** Live snapshots are operational state and remain separate from hardware evidence truth. */
 interface ConsoleSnapshotProvider {
@@ -56,6 +61,21 @@ interface ConsoleSnapshotProvider {
 }
 
 /**
+ * Unified inbound/outbound protocol boundary used by a composition root.
+ *
+ * An authenticated implementation keeps inbound session callbacks behind its authentication
+ * decorator while routing core events and live publications through the exact same required-hello
+ * adapter. Callers never receive that raw required adapter.
+ */
+interface ConsoleProtocolEndpoint : ConsoleClientSessionHandler, ConsoleEventSink {
+    fun publishTelemetry(payload: TelemetryPayload): Boolean
+
+    fun publishRuntimeState(payload: RuntimeStatePayload): Boolean
+
+    fun publishHealth(payload: HealthPayload): Boolean
+}
+
+/**
  * Maps the strict browser protocol onto [ConsoleServerCore]. The provider indirection lets the
  * composition root wire the core's asynchronous [ConsoleEventSink] back into this adapter without
  * making the safety core depend on transport types.
@@ -65,8 +85,9 @@ class ConsoleCoreProtocolAdapter(
     private val snapshots: ConsoleSnapshotProvider,
     private val serverVersion: String,
     private val emitPayload: (targetSessionId: String?, payload: ConsoleServerPayload) -> Boolean,
-) : ConsoleClientSessionHandler, ConsoleEventSink {
+) : ConsoleProtocolEndpoint {
     private val leaseRequestMessageId = ThreadLocal<String?>()
+    private var handshakeSecurity = ConsoleHandshakeSecurity.DISABLED
 
     init {
         require(serverVersion.isNotBlank()) { "serverVersion must not be blank" }
@@ -242,11 +263,11 @@ class ConsoleCoreProtocolAdapter(
         }
     }
 
-    fun publishTelemetry(payload: TelemetryPayload): Boolean = emitPayload(null, payload)
+    override fun publishTelemetry(payload: TelemetryPayload): Boolean = emitPayload(null, payload)
 
-    fun publishRuntimeState(payload: RuntimeStatePayload): Boolean = emitPayload(null, payload)
+    override fun publishRuntimeState(payload: RuntimeStatePayload): Boolean = emitPayload(null, payload)
 
-    fun publishHealth(payload: HealthPayload): Boolean = emitPayload(null, payload)
+    override fun publishHealth(payload: HealthPayload): Boolean = emitPayload(null, payload)
 
     private fun handleHello(
         sessionId: String,
@@ -261,13 +282,7 @@ class ConsoleCoreProtocolAdapter(
         )
         requireEmit(
             sessionId,
-            ServerHelloPayload(
-                sessionId = sessionId,
-                serverVersion = serverVersion,
-                selectedProtocolVersion = "1.0",
-                authenticationRequired = false,
-                acceptedAuthenticationSchemes = emptyList(),
-            ),
+            handshakeSecurity.serverHello(sessionId, serverVersion),
         )
         requireEmit(sessionId, snapshots.runtimeState())
         requireEmit(sessionId, snapshots.capabilitySnapshot())
@@ -355,4 +370,75 @@ class ConsoleCoreProtocolAdapter(
             ConsoleSafetyTrigger.ACTUATION_READINESS_LOST -> SafetyTrigger.ACTUATION_READINESS_LOST
             ConsoleSafetyTrigger.SERVER_STOP -> SafetyTrigger.SERVER_STOP
         }
+
+    companion object {
+        /**
+         * Atomically constructs the only bearer-authenticated adapter composition.
+         *
+         * The required hello metadata and authentication/authorization decorator cannot be
+         * requested separately. The required adapter remains private; the returned opaque endpoint
+         * sends inbound calls through enforcement and outbound calls through that same adapter.
+         */
+        fun authenticatedBearer(
+            coreProvider: () -> ConsoleServerCore,
+            snapshots: ConsoleSnapshotProvider,
+            serverVersion: String,
+            emitPayload: (targetSessionId: String?, payload: ConsoleServerPayload) -> Boolean,
+            verifier: ConsoleBearerTokenVerifier,
+            auditSink: ConsoleAuditSink,
+            epochClock: ConsoleEpochClock = ConsoleEpochClock(System::currentTimeMillis),
+            monotonicClock: ConsoleMonotonicClock = ConsoleMonotonicClock(System::nanoTime),
+        ): ConsoleProtocolEndpoint {
+            val requiredAdapter =
+                ConsoleCoreProtocolAdapter(
+                    coreProvider = coreProvider,
+                    snapshots = snapshots,
+                    serverVersion = serverVersion,
+                    emitPayload = emitPayload,
+                )
+            requiredAdapter.handshakeSecurity = ConsoleHandshakeSecurity.BEARER_REQUIRED
+            return AuthenticatedConsoleProtocolEndpoint(
+                inbound =
+                    AuthenticatingConsoleClientSessionHandler(
+                        inner = requiredAdapter,
+                        verifier = verifier,
+                        auditSink = auditSink,
+                        epochClock = epochClock,
+                        monotonicClock = monotonicClock,
+                    ),
+                outbound = requiredAdapter,
+            )
+        }
+    }
+}
+
+/** Raw required adapter remains encapsulated; only this split-delegating endpoint escapes. */
+private class AuthenticatedConsoleProtocolEndpoint(
+    private val inbound: ConsoleClientSessionHandler,
+    private val outbound: ConsoleCoreProtocolAdapter,
+) : ConsoleProtocolEndpoint {
+    override fun onSessionOpened(sessionId: String) = inbound.onSessionOpened(sessionId)
+
+    override fun onClientMessage(
+        sessionId: String,
+        message: ConsoleClientMessage,
+    ) = inbound.onClientMessage(sessionId, message)
+
+    override fun onSessionClosed(
+        sessionId: String,
+        reason: String,
+    ) = inbound.onSessionClosed(sessionId, reason)
+
+    override fun emit(
+        targetSessionId: String?,
+        event: ConsoleCoreEvent,
+    ) = outbound.emit(targetSessionId, event)
+
+    override fun publishTelemetry(payload: TelemetryPayload): Boolean =
+        outbound.publishTelemetry(payload)
+
+    override fun publishRuntimeState(payload: RuntimeStatePayload): Boolean =
+        outbound.publishRuntimeState(payload)
+
+    override fun publishHealth(payload: HealthPayload): Boolean = outbound.publishHealth(payload)
 }
