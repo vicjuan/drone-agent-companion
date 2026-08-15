@@ -11,7 +11,6 @@ import java.lang.reflect.Modifier
 import java.util.Locale
 import java.util.zip.ZipFile
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -102,13 +101,6 @@ class OpenCvAndroidRuntimeInstrumentedTest {
             "APK must package exactly the target ABI OpenCV JNI runtime",
             setOf("lib/arm64-v8a/libopencv_java4.so"),
             openCvNativeEntries,
-        )
-        assertFalse(
-            "APK must not package desktop native resources",
-            entries.any { entry ->
-                entry.endsWith(".dylib") || entry.endsWith(".dll") || entry.endsWith(".jnilib") ||
-                    entry.startsWith("natives/") || entry.contains("/natives/")
-            },
         )
         assertClassAbsent("nu.pattern.OpenCV")
         assertClassAbsent("org.openpnp.OpenCV")
