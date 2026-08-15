@@ -5,6 +5,7 @@ import com.durendal.droneagent.adapter.mock.MockDroneAgent
 import com.durendal.droneagent.companion.console.mock.MockConsoleCommandExecutor
 import com.durendal.droneagent.companion.console.mock.MockConsoleSnapshotProvider
 import com.durendal.droneagent.companion.console.mock.ObservableMockReturnToHomePort
+import com.durendal.droneagent.companion.console.protocol.ActuationLockState
 import com.durendal.droneagent.companion.console.server.ConsoleCommandAdmission
 import com.durendal.droneagent.companion.console.server.ConsoleEpochClock
 import com.durendal.droneagent.companion.console.server.ConsoleMonotonicClock
@@ -14,6 +15,7 @@ import com.durendal.droneagent.companion.console.server.FileConsoleAuditSink
 import com.durendal.droneagent.companion.console.server.JdkConsoleDeadlineScheduler
 import com.durendal.droneagent.companion.console.server.toActuationReadiness
 import com.durendal.droneagent.companion.console.server.transport.ConsoleCoreProtocolAdapter
+import com.durendal.droneagent.companion.console.server.transport.ConsoleSnapshotProvider
 import com.durendal.droneagent.companion.console.server.transport.ConsoleServerConfig
 import com.durendal.droneagent.companion.console.server.transport.KtorConsoleServer
 import com.durendal.droneagent.companion.console.server.transport.ProtocolConsoleSocketController
@@ -63,15 +65,27 @@ class AndroidConsoleRuntime(
     private val config: AndroidConsoleRuntimeConfig,
     private val monotonicNanos: () -> Long = System::nanoTime,
     private val epochMillis: () -> Long = System::currentTimeMillis,
+    private val agentFactory: () -> MockDroneAgent = { MockDroneAgent() },
 ) : HeadlessRuntime {
     private val lifecycleLock = Any()
+    private val stopRequested = AtomicBoolean(false)
+    private val startupReady = AtomicBoolean(false)
     private var state = State.NEW
-    private var components: Components? = null
+    @Volatile private var startingComponents: Components? = null
+    @Volatile private var components: Components? = null
     private var terminalCloseResult: RuntimeCloseResult? = null
+
+    override fun requestStop() {
+        stopRequested.set(true)
+        startupReady.set(false)
+        startingComponents?.closeActuationAdmission()
+        components?.closeActuationAdmission()
+    }
 
     override fun start() {
         synchronized(lifecycleLock) {
             check(state == State.NEW) { "headless console runtime may be started only once" }
+            check(!stopRequested.get()) { "headless runtime startup was cancelled" }
             check(config.webRoot.isDirectory) {
                 "packaged web console is unavailable at ${config.webRoot.absolutePath}"
             }
@@ -88,15 +102,32 @@ class AndroidConsoleRuntime(
                 }
                 throw failure
             }
+        startingComponents = created
         try {
+            ensureStartupAdmitted(created)
             created.installListeners()
+            ensureStartupAdmitted(created)
             created.agent.connection.connect()
+            ensureStartupAdmitted(created)
             created.publishRuntimeState()
-            created.agent.telemetry.start()
+            ensureStartupAdmitted(created)
             created.server.start(wait = false)
+            ensureStartupAdmitted(created)
+            // Keep periodic telemetry stopped while the one-time canonical matrix parse warms.
+            // A browser may already load the SPA/health endpoint, but HANDSHAKING cannot overflow
+            // its bounded broadcast queue before this cold path finishes.
+            created.prewarmCapabilitySnapshot()
+            ensureStartupAdmitted(created)
+            synchronized(lifecycleLock) {
+                check(!stopRequested.get()) { "headless runtime startup was cancelled" }
+                components = created
+                startingComponents = null
+                state = State.ADMISSION_PENDING
+            }
         } catch (failure: Throwable) {
             val cleanupResult = created.closeWithin(CLOSE_AFTER_START_FAILURE_MILLIS)
             synchronized(lifecycleLock) {
+                startingComponents = null
                 terminalCloseResult =
                     cleanupResult.takeUnless { it == RuntimeCloseResult.TIMED_OUT }
                 components =
@@ -110,10 +141,38 @@ class AndroidConsoleRuntime(
             }
             throw failure
         }
+    }
 
-        synchronized(lifecycleLock) {
-            components = created
-            state = State.RUNNING
+    override fun admitActuation() {
+        val admitting =
+            synchronized(lifecycleLock) {
+                check(state == State.ADMISSION_PENDING) {
+                    "headless console runtime is not awaiting actuation admission"
+                }
+                check(!stopRequested.get()) { "headless runtime admission was cancelled" }
+                state = State.ADMITTING
+                checkNotNull(components) { "headless console components are unavailable" }
+            }
+
+        try {
+            ensureStartupAdmitted(admitting)
+            startupReady.set(true)
+            ensureStartupAdmitted(admitting)
+            admitting.publishRuntimeState()
+            ensureStartupAdmitted(admitting)
+            admitting.agent.telemetry.start()
+            ensureStartupAdmitted(admitting)
+            synchronized(lifecycleLock) {
+                check(!stopRequested.get()) { "headless runtime admission was cancelled" }
+                state = State.RUNNING
+            }
+        } catch (failure: Throwable) {
+            startupReady.set(false)
+            admitting.closeActuationAdmission()
+            synchronized(lifecycleLock) {
+                if (state == State.ADMITTING) state = State.ADMISSION_PENDING
+            }
+            throw failure
         }
     }
 
@@ -129,6 +188,8 @@ class AndroidConsoleRuntime(
                         return RuntimeCloseResult.CLOSED
                     }
                     State.STARTING -> return RuntimeCloseResult.FAILED
+                    State.ADMISSION_PENDING,
+                    State.ADMITTING,
                     State.RUNNING -> {
                         state = State.CLOSING
                         components.also { components = null }
@@ -157,10 +218,16 @@ class AndroidConsoleRuntime(
     private fun createComponents(): Components {
         val monotonicClock = ConsoleMonotonicClock(monotonicNanos)
         val epochClock = ConsoleEpochClock(epochMillis)
-        val agent = MockDroneAgent()
+        val agent = agentFactory()
         val returnToHome = ObservableMockReturnToHomePort()
         val executor = MockConsoleCommandExecutor(agent, monotonicClock, returnToHome)
         val snapshots = MockConsoleSnapshotProvider(agent, returnToHome)
+        val admittedSnapshots =
+            StartupGatedConsoleSnapshotProvider(
+                delegate = snapshots,
+                startupReady = startupReady,
+                stopRequested = stopRequested,
+            )
         val scheduler = JdkConsoleDeadlineScheduler(monotonicClock)
         val audit =
             try {
@@ -181,7 +248,7 @@ class AndroidConsoleRuntime(
                     coreProvider = {
                         checkNotNull(coreReference.get()) { "console core not attached" }
                     },
-                    snapshots = snapshots,
+                    snapshots = admittedSnapshots,
                     serverVersion = SERVER_VERSION,
                     emitPayload = { target, payload ->
                         controllerReference.get()?.emit(target, payload) ?: false
@@ -225,11 +292,11 @@ class AndroidConsoleRuntime(
                 }
             lateinit var publishRuntimeState: () -> Unit
             publishRuntimeState = {
-                val runtimeState = snapshots.runtimeState()
+                val admittedRuntimeState = admittedSnapshots.runtimeState()
                 // Update the server-owned gate before publishing browser-visible state. A raw
                 // socket client therefore cannot dispatch through an unlocked UI snapshot alone.
-                core.updateActuationReadiness(runtimeState.toActuationReadiness())
-                protocol.publishRuntimeState(runtimeState)
+                core.updateActuationReadiness(admittedRuntimeState.toActuationReadiness())
+                protocol.publishRuntimeState(admittedRuntimeState)
             }
             val connectionListener = ConnectionListener { publishRuntimeState() }
             val actuationListener = FlightControlPortSnapshotListener { publishRuntimeState() }
@@ -245,6 +312,7 @@ class AndroidConsoleRuntime(
                 connectionListener = connectionListener,
                 actuationListener = actuationListener,
                 publishRuntimeState = publishRuntimeState,
+                prewarmCapabilitySnapshot = { snapshots.capabilitySnapshot() },
                 monotonicNanos = monotonicNanos,
             )
         } catch (failure: Throwable) {
@@ -271,9 +339,18 @@ class AndroidConsoleRuntime(
         }
     }
 
+    private fun ensureStartupAdmitted(created: Components) {
+        if (stopRequested.get()) {
+            created.closeActuationAdmission()
+            throw IllegalStateException("headless runtime startup was cancelled")
+        }
+    }
+
     private enum class State {
         NEW,
         STARTING,
+        ADMISSION_PENDING,
+        ADMITTING,
         RUNNING,
         CLOSING,
         CLOSE_INCOMPLETE,
@@ -291,6 +368,7 @@ class AndroidConsoleRuntime(
         private val connectionListener: ConnectionListener,
         private val actuationListener: FlightControlPortSnapshotListener,
         val publishRuntimeState: () -> Unit,
+        private val prewarmCapabilitySnapshot: () -> Unit,
         monotonicNanos: () -> Long,
     ) {
         private val listenersInstalled = AtomicBoolean(false)
@@ -311,6 +389,14 @@ class AndroidConsoleRuntime(
         }
 
         fun closeWithin(timeoutMillis: Long): RuntimeCloseResult = closer.closeWithin(timeoutMillis)
+
+        fun prewarmCapabilitySnapshot() {
+            prewarmCapabilitySnapshot.invoke()
+        }
+
+        fun closeActuationAdmission() {
+            core.closeActuationAdmission()
+        }
 
         private fun cleanupAfterNeutral() {
             var firstFailure: Throwable? = null
@@ -341,4 +427,19 @@ class AndroidConsoleRuntime(
         const val SERVER_VERSION = "0.2.0-headless-mock"
         const val CLOSE_AFTER_START_FAILURE_MILLIS = 2_000L
     }
+}
+
+internal class StartupGatedConsoleSnapshotProvider(
+    private val delegate: ConsoleSnapshotProvider,
+    private val startupReady: AtomicBoolean,
+    private val stopRequested: AtomicBoolean,
+) : ConsoleSnapshotProvider by delegate {
+    override fun runtimeState() =
+        delegate.runtimeState().let { runtimeState ->
+            if (stopRequested.get() || !startupReady.get()) {
+                runtimeState.copy(actuationLock = ActuationLockState.LOCKED)
+            } else {
+                runtimeState
+            }
+        }
 }

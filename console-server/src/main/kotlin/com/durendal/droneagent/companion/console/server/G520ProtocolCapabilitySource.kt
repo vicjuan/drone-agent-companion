@@ -22,18 +22,21 @@ class G520ProtocolCapabilitySource private constructor(
                 requireNotNull(classLoader.getResourceAsStream(CapabilityMatrixLoader.BUNDLED_RESOURCE)) {
                     "Missing bundled capability matrix: ${CapabilityMatrixLoader.BUNDLED_RESOURCE}"
                 }.use { it.readBytes() }
+            // CapabilityMatrixLoader already performs the complete fail-closed validation. Project
+            // the protocol snapshot directly from that validated document: routing it through
+            // G520CapabilityMatrixProvider would validate a second time and eagerly construct the
+            // unrelated upstream core CapabilityMatrix on Android's cold-start path.
             val document = CapabilityMatrixLoader().load(bytes.toString(Charsets.UTF_8))
-            val detached = G520CapabilityMatrixProvider(document).evidenceMatrix
             return G520ProtocolCapabilitySource(
                 CapabilitySnapshotPayload(
-                    matrixId = detached.matrixId,
-                    schemaVersion = detached.schemaVersion,
-                    lastUpdated = detached.lastUpdated,
+                    matrixId = document.matrixId,
+                    schemaVersion = document.schemaVersion,
+                    lastUpdated = document.lastUpdated,
                     sourceDigestSha256 = bytes.sha256(),
                     rows =
                         Collections.unmodifiableList(
                             ArrayList(
-                                detached.rows.map { row ->
+                                document.rows.map { row ->
                                     CapabilitySnapshotRow(
                                         id = row.id,
                                         status = row.status.toProtocol(),

@@ -23,12 +23,15 @@ import java.util.concurrent.atomic.AtomicLong
 class MockConsoleSnapshotProvider(
     private val agent: MockDroneAgent,
     private val returnToHome: ObservableMockReturnToHomePort,
-    private val capabilitySource: G520ProtocolCapabilitySource =
-        G520ProtocolCapabilitySource.loadBundled(),
+    capabilitySnapshotLoader: () -> CapabilitySnapshotPayload = {
+        G520ProtocolCapabilitySource.loadBundled().snapshot()
+    },
     private val monotonicClockNanos: () -> Long = System::nanoTime,
 ) : ConsoleSnapshotProvider {
     private val startedAtNanos = monotonicClockNanos()
     private val telemetrySequence = AtomicLong(0L)
+    private val loadedCapabilitySnapshot =
+        lazy(LazyThreadSafetyMode.SYNCHRONIZED, capabilitySnapshotLoader)
 
     override fun runtimeState(): RuntimeStatePayload =
         RuntimeStatePayload(
@@ -44,7 +47,7 @@ class MockConsoleSnapshotProvider(
             operatingProfile = OperatingProfile.LOCALHOST_DEVELOPMENT,
         )
 
-    override fun capabilitySnapshot(): CapabilitySnapshotPayload = capabilitySource.snapshot()
+    override fun capabilitySnapshot(): CapabilitySnapshotPayload = loadedCapabilitySnapshot.value
 
     override fun health(): HealthPayload =
         HealthPayload(

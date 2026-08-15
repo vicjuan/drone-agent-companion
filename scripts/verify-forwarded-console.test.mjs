@@ -229,6 +229,15 @@ async function startFakeConsoleServer({
   const server = net.createServer((socket) => {
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
+    // Negative-path clients deliberately destroy the connection as soon as a contract mismatch is
+    // proven. The fake server may still be flushing its scripted batch; absorb that expected peer
+    // reset so it cannot turn the assertion into an unrelated process-level error.
+    socket.on("error", (error) => {
+      assert.ok(
+        error.code === "ECONNRESET" || error.code === "EPIPE",
+        `fake server observed unexpected socket error ${error.code ?? error.message}`,
+      );
+    });
     let buffer = Buffer.alloc(0);
     let upgraded = false;
     let clientFrameBuffer = Buffer.alloc(0);

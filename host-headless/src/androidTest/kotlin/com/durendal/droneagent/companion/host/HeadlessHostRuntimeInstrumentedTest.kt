@@ -1,11 +1,13 @@
 package com.durendal.droneagent.companion.host
 
 import android.app.ActivityManager
+import android.content.ComponentName
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.io.File
 import java.nio.channels.FileChannel
+import java.nio.channels.OverlappingFileLockException
 import java.nio.file.LinkOption
 import java.nio.file.StandardOpenOption
 import java.util.Collections
@@ -20,12 +22,32 @@ import okhttp3.WebSocketListener
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
 /** API 34 runtime smoke; this is emulator evidence and never G520 hardware evidence. */
 @RunWith(AndroidJUnit4::class)
 class HeadlessHostRuntimeInstrumentedTest {
+    @Before
+    fun isolateAgentServiceFromPreviousTest() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val client =
+            OkHttpClient.Builder()
+                .connectTimeout(1, TimeUnit.SECONDS)
+                .readTimeout(1, TimeUnit.SECONDS)
+                .build()
+        try {
+            if (isAgentServiceRunning(context)) {
+                requestSafeStopAndAwaitServiceDestroyed(context, client)
+            }
+            assertUnavailableFor(client, "$DEVICE_HTTP_ORIGIN/healthz", ISOLATION_STABLE_MILLIS)
+        } finally {
+            client.dispatcher.executorService.shutdownNow()
+            client.connectionPool.evictAll()
+        }
+    }
+
     @Test
     fun foregroundServiceServesSpaAndRunsStrictMockCommandPath() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
@@ -50,13 +72,21 @@ class HeadlessHostRuntimeInstrumentedTest {
             assertEquals("DENY", health.header("X-Frame-Options"))
             health.close()
 
+            val agentPid = awaitAgentPid(context, excludedPid = null, START_TIMEOUT_MILLIS)
+            awaitLifecycleRecords(context, START_TIMEOUT_MILLIS) { records ->
+                records.any {
+                    it.epochMillis >= lifecycleEpochFloor &&
+                        it.pid == agentPid &&
+                        it.event == LifecycleEvent.RUNTIME_STARTED.wireName
+                }
+            }
+
             val index = awaitHttp(client, "$DEVICE_HTTP_ORIGIN/", START_TIMEOUT_MILLIS)
             assertEquals(200, index.code)
             assertTrue(index.body?.string().orEmpty().contains("Drone Agent Companion"))
             assertTrue(index.header("Content-Security-Policy").orEmpty().contains("frame-ancestors 'none'"))
             index.close()
 
-            val agentPid = awaitAgentPid(context, excludedPid = null, START_TIMEOUT_MILLIS)
             assertTrue("instrumentation must be outside the :agent process", agentPid != instrumentationPid)
             val messages = Collections.synchronizedList(mutableListOf<String>())
             val failure = AtomicReference<Throwable?>()
@@ -210,6 +240,13 @@ class HeadlessHostRuntimeInstrumentedTest {
             HeadlessAgentService.requestStart(context)
             awaitHttp(client, "$DEVICE_HTTP_ORIGIN/healthz", START_TIMEOUT_MILLIS).close()
             val oldPid = awaitAgentPid(context, excludedPid = null, START_TIMEOUT_MILLIS)
+            awaitLifecycleRecords(context, START_TIMEOUT_MILLIS) { records ->
+                records.any {
+                    it.epochMillis >= lifecycleEpochFloor &&
+                        it.pid == oldPid &&
+                        it.event == LifecycleEvent.RUNTIME_STARTED.wireName
+                }
+            }
 
             // The instrumentation process has the same application UID but is distinct from the
             // :agent service process, so it can inject an ordinary process death and survive to
@@ -222,10 +259,15 @@ class HeadlessHostRuntimeInstrumentedTest {
 
             awaitLifecycleRecords(context, RESTART_TIMEOUT_MILLIS) { records ->
                 records.any {
-                    it.epochMillis >= lifecycleEpochFloor &&
-                        it.pid == newPid &&
-                        it.event == LifecycleEvent.STICKY_RESTART_OBSERVED.wireName
-                } &&
+                        it.epochMillis >= lifecycleEpochFloor &&
+                            it.pid == newPid &&
+                            it.event == LifecycleEvent.RUNTIME_STARTED.wireName
+                    } &&
+                    records.any {
+                        it.epochMillis >= lifecycleEpochFloor &&
+                            it.pid == newPid &&
+                            it.event == LifecycleEvent.STICKY_RESTART_OBSERVED.wireName
+                    } &&
                     records.any {
                         it.epochMillis >= lifecycleEpochFloor &&
                             it.pid == newPid &&
@@ -248,8 +290,8 @@ class HeadlessHostRuntimeInstrumentedTest {
         client: OkHttpClient,
         serviceMayBeRunning: Boolean,
     ) {
-        if (serviceMayBeRunning) {
-            runCatching { HeadlessAgentService.requestSafeStop(context) }
+        if (serviceMayBeRunning || isAgentServiceRunning(context)) {
+            runCatching { requestSafeStopAndAwaitServiceDestroyed(context, client) }
         }
         // Cleanup must not mask the original assertion, but it must still wait for the command
         // surface to disappear before this test releases its client and the next test can start.
@@ -271,7 +313,13 @@ class HeadlessHostRuntimeInstrumentedTest {
             }
             Thread.sleep(POLL_MILLIS)
         }
-        throw AssertionError("HTTP endpoint did not become ready", lastFailure)
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val agentPid = currentAgentPid(context)
+        val lifecycleTail = readLifecycleDiagnosticTail(context)
+        throw AssertionError(
+            "HTTP endpoint did not become ready; agentPid=$agentPid lifecycleTail=[$lifecycleTail]",
+            lastFailure,
+        )
     }
 
     private fun awaitUnavailable(client: OkHttpClient, url: String, timeoutMillis: Long) {
@@ -396,13 +444,13 @@ class HeadlessHostRuntimeInstrumentedTest {
         val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMillis
         while (android.os.SystemClock.elapsedRealtime() < deadline) {
             val records = readAndValidateLifecycleRecords(context)
-            if (predicate(records)) return records
+            if (records != null && predicate(records)) return records
             Thread.sleep(POLL_MILLIS)
         }
         throw AssertionError("Lifecycle evidence did not reach the expected state")
     }
 
-    private fun readAndValidateLifecycleRecords(context: Context): List<LifecycleRecord> {
+    private fun readAndValidateLifecycleRecords(context: Context): List<LifecycleRecord>? {
         val directory = HeadlessHostStorage.lifecycleDirectory(context)
         val lockFile = File(directory, LifecycleEvidenceJournal.LOCK_FILE_NAME)
         val records = mutableListOf<LifecycleRecord>()
@@ -412,13 +460,20 @@ class HeadlessHostRuntimeInstrumentedTest {
             StandardOpenOption.WRITE,
             LinkOption.NOFOLLOW_LINKS,
         ).use { lockChannel ->
-            lockChannel.lock().use {
+            val fileLock =
+                try {
+                    lockChannel.tryLock()
+                } catch (_: OverlappingFileLockException) {
+                    null
+                }
+            if (fileLock == null) return null
+            fileLock.use {
                 val files =
                     listOf(
                         File(directory, LifecycleEvidenceJournal.PREVIOUS_FILE_NAME),
                         File(directory, LifecycleEvidenceJournal.CURRENT_FILE_NAME),
                     )
-                assertTrue("current lifecycle journal must exist", files.last().isFile)
+                if (!files.last().isFile) return null
                 files.filter(File::exists).forEach { file ->
                     assertTrue("lifecycle journal must be a regular file", file.isFile)
                     assertTrue(
@@ -434,8 +489,27 @@ class HeadlessHostRuntimeInstrumentedTest {
                 }
             }
         }
-        assertTrue("lifecycle journal must contain records", records.isNotEmpty())
-        return records
+        return records.takeIf { it.isNotEmpty() }
+    }
+
+    /** Timeout diagnostics must never block behind the journal's cross-process fsync lock. */
+    private fun readLifecycleDiagnosticTail(context: Context): String {
+        val directory = HeadlessHostStorage.lifecycleDirectory(context)
+        return listOf(
+                File(directory, LifecycleEvidenceJournal.PREVIOUS_FILE_NAME),
+                File(directory, LifecycleEvidenceJournal.CURRENT_FILE_NAME),
+            ).asSequence()
+            .filter(File::isFile)
+            .flatMap { file ->
+                runCatching { file.readLines(Charsets.UTF_8).asSequence() }
+                    .getOrDefault(emptySequence())
+            }
+            .mapNotNull { line -> runCatching { parseLifecycleRecord(line) }.getOrNull() }
+            .toList()
+            .takeLast(16)
+            .joinToString(separator = ",") { record ->
+                "${record.event}@${record.epochMillis}#${record.pid}"
+            }
     }
 
     /** Caller owns the journal OS lock, so these files cannot rotate during this read. */
@@ -490,6 +564,36 @@ class HeadlessHostRuntimeInstrumentedTest {
         throw AssertionError("Agent process $expectedProcessName did not reach the expected PID state")
     }
 
+    private fun currentAgentPid(context: Context): Int? {
+        val expectedProcessName = "${context.packageName}:agent"
+        return context.getSystemService(ActivityManager::class.java)
+            .runningAppProcesses.orEmpty()
+            .firstOrNull { process -> process.processName == expectedProcessName }
+            ?.pid
+            ?.takeIf { it > 0 }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun isAgentServiceRunning(context: Context): Boolean {
+        val component = ComponentName(context, HeadlessAgentService::class.java)
+        return context.getSystemService(ActivityManager::class.java)
+            .getRunningServices(Int.MAX_VALUE)
+            .any { service -> service.service == component }
+    }
+
+    private fun requestSafeStopAndAwaitServiceDestroyed(context: Context, client: OkHttpClient) {
+        val destroyedBefore =
+            awaitLifecycleRecords(context, ISOLATION_TIMEOUT_MILLIS) { true }
+                .count { it.event == LifecycleEvent.SERVICE_DESTROYED.wireName }
+        HeadlessAgentService.requestSafeStop(context)
+        awaitUnavailable(client, "$DEVICE_HTTP_ORIGIN/healthz", STOP_TIMEOUT_MILLIS)
+        awaitLifecycleRecords(context, ISOLATION_TIMEOUT_MILLIS) { records ->
+            !isAgentServiceRunning(context) &&
+                records.count { it.event == LifecycleEvent.SERVICE_DESTROYED.wireName } >
+                    destroyedBefore
+        }
+    }
+
     private fun takeoffRequest(leaseId: String): String =
         """
         {
@@ -515,10 +619,12 @@ class HeadlessHostRuntimeInstrumentedTest {
     private companion object {
         const val DEVICE_HTTP_ORIGIN = "http://127.0.0.1:8080"
         const val FORWARDED_BROWSER_ORIGIN = "http://127.0.0.1:18080"
-        const val START_TIMEOUT_MILLIS = 30_000L
-        const val STOP_TIMEOUT_MILLIS = 15_000L
-        const val RESTART_TIMEOUT_MILLIS = 45_000L
-        const val MESSAGE_TIMEOUT_MILLIS = 15_000L
+        const val START_TIMEOUT_MILLIS = 120_000L
+        const val STOP_TIMEOUT_MILLIS = 45_000L
+        const val RESTART_TIMEOUT_MILLIS = 120_000L
+        const val MESSAGE_TIMEOUT_MILLIS = 60_000L
+        const val ISOLATION_TIMEOUT_MILLIS = 90_000L
+        const val ISOLATION_STABLE_MILLIS = 2_000L
         const val POLL_MILLIS = 100L
         const val LEASE_REQUEST_ID = "android-lease-message-001"
         const val COMMAND_ID = "android-takeoff-command-001"

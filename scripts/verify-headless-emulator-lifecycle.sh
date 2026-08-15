@@ -370,6 +370,10 @@ if [[ "$PRE_RUNTIME_APK_SHA256" != "$APK_SHA256" ]]; then
 fi
 wait_for_health > "$EVIDENCE_DIR/health-after-reboot.json"
 BOOT_TO_HEALTH_SECONDS=$((SECONDS - BOOT_COMPLETED_HOST_SECONDS))
+wait_for_reboot_evidence "$BOOT_PID" "$REBOOT_EPOCH_FLOOR_MS"
+python3 -c \
+    'import json,sys; [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]' \
+    "$EVIDENCE_DIR/lifecycle-after-reboot.jsonl"
 require_agent_pid "$BOOT_PID" "pre-smoke readiness"
 curl --noproxy '*' -fsS --max-time 3 \
     "http://127.0.0.1:$HOST_FORWARD_PORT/" \
@@ -404,10 +408,6 @@ if [[ "$RUNTIME_APK_SHA256" != "$APK_SHA256" ]]; then
     exit 1
 fi
 adb_cmd shell dumpsys package "$PACKAGE_NAME" > "$EVIDENCE_DIR/package-after-reboot.txt"
-wait_for_reboot_evidence "$BOOT_PID" "$REBOOT_EPOCH_FLOOR_MS"
-python3 -c \
-    'import json,sys; [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]' \
-    "$EVIDENCE_DIR/lifecycle-after-reboot.jsonl"
 require_agent_pid "$BOOT_PID" "pre-force-stop evidence capture"
 
 echo "[headless-emulator] force-stop negative test (automatic recovery must not occur)"

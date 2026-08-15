@@ -1,10 +1,17 @@
 package com.durendal.droneagent.companion.host
 
+import com.durendal.droneagent.adapter.mock.MockDroneAgent
+import com.durendal.droneagent.companion.console.mock.MockConsoleSnapshotProvider
+import com.durendal.droneagent.companion.console.mock.ObservableMockReturnToHomePort
+import com.durendal.droneagent.companion.console.protocol.ActuationLockState
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.ServerSocket
 import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -20,6 +27,7 @@ class AndroidConsoleRuntimeTest {
         File(webRoot, "index.html").writeText("<html>headless</html>")
         val auditFile = temporaryFolder.root.resolve("audit/console-events.jsonl")
         val port = availablePort()
+        val agent = MockDroneAgent()
         val runtime =
             AndroidConsoleRuntime(
                 AndroidConsoleRuntimeConfig(
@@ -27,18 +35,57 @@ class AndroidConsoleRuntimeTest {
                     auditFile = auditFile,
                     bindPort = port,
                 ),
+                agentFactory = { agent },
             )
 
         runtime.start()
         try {
             assertEquals("{\"status\":\"ok\"}", awaitHealth(port))
+            assertNull("start must leave periodic telemetry stopped", agent.telemetry.latest())
+            val lockedAudit = auditFile.readText()
+            assertTrue(lockedAudit.contains("mock:connected:locked:localhost_development"))
+            assertFalse(lockedAudit.contains("mock:connected:unlocked:localhost_development"))
+
+            runtime.admitActuation()
+            assertTrue("admission must start periodic telemetry", awaitTelemetry(agent))
+            assertTrue(
+                auditFile.readText().contains("mock:connected:unlocked:localhost_development"),
+            )
+            assertTrue(
+                "actuation admission must be single use",
+                runCatching(runtime::admitActuation).isFailure,
+            )
         } finally {
+            runtime.requestStop()
             assertEquals(RuntimeCloseResult.CLOSED, runtime.closeWithin(2_000L))
         }
 
         val audit = auditFile.readText()
         assertTrue(audit.contains("\"kind\":\"actuation_readiness_changed\""))
         assertTrue(audit.contains("\"kind\":\"server_stopped\""))
+    }
+
+    @Test
+    fun `stop before actuation admission rejects the late admission`() {
+        val webRoot = temporaryFolder.newFolder("admission-web")
+        File(webRoot, "index.html").writeText("<html>headless</html>")
+        val auditFile = temporaryFolder.root.resolve("admission/audit.jsonl")
+        val runtime =
+            AndroidConsoleRuntime(
+                AndroidConsoleRuntimeConfig(
+                    webRoot = webRoot,
+                    auditFile = auditFile,
+                    bindPort = availablePort(),
+                ),
+            )
+
+        runtime.start()
+        runtime.requestStop()
+        assertTrue(runCatching(runtime::admitActuation).isFailure)
+        assertFalse(
+            auditFile.readText().contains("mock:connected:unlocked:localhost_development"),
+        )
+        assertEquals(RuntimeCloseResult.CLOSED, runtime.closeWithin(2_000L))
     }
 
     @Test
@@ -74,6 +121,32 @@ class AndroidConsoleRuntimeTest {
         )
     }
 
+    @Test
+    fun `browser runtime snapshot remains locked until startup and after terminal stop`() {
+        val agent = MockDroneAgent()
+        val startupReady = AtomicBoolean(false)
+        val stopRequested = AtomicBoolean(false)
+        val snapshots =
+            StartupGatedConsoleSnapshotProvider(
+                delegate = MockConsoleSnapshotProvider(agent, ObservableMockReturnToHomePort()),
+                startupReady = startupReady,
+                stopRequested = stopRequested,
+            )
+        try {
+            agent.connection.connect()
+
+            assertEquals(ActuationLockState.LOCKED, snapshots.runtimeState().actuationLock)
+
+            startupReady.set(true)
+            assertEquals(ActuationLockState.UNLOCKED, snapshots.runtimeState().actuationLock)
+
+            stopRequested.set(true)
+            assertEquals(ActuationLockState.LOCKED, snapshots.runtimeState().actuationLock)
+        } finally {
+            agent.shutdown()
+        }
+    }
+
     private fun awaitHealth(port: Int): String {
         val deadline = System.nanoTime() + 5_000_000_000L
         var lastFailure: Throwable? = null
@@ -95,4 +168,13 @@ class AndroidConsoleRuntimeTest {
     }
 
     private fun availablePort(): Int = ServerSocket(0).use { it.localPort }
+
+    private fun awaitTelemetry(agent: MockDroneAgent): Boolean {
+        val deadline = System.nanoTime() + 2_000_000_000L
+        while (System.nanoTime() < deadline) {
+            if (agent.telemetry.latest() != null) return true
+            Thread.sleep(10L)
+        }
+        return false
+    }
 }

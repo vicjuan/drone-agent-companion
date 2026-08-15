@@ -77,6 +77,7 @@ class HeadlessAgentService : Service() {
             // Close admission synchronously at the Android callback boundary. Work already queued
             // before this action rechecks the same latch on the lifecycle executor.
             startAdmissionClosed.set(true)
+            controller?.requestStop()
             submitLifecycleWork { performSafeStop() }
             return START_NOT_STICKY
         }
@@ -87,6 +88,7 @@ class HeadlessAgentService : Service() {
 
         if (intent != null && intent.action != ACTION_START) {
             startAdmissionClosed.set(true)
+            controller?.requestStop()
             submitLifecycleWork { performSafeStop() }
             return START_NOT_STICKY
         }
@@ -116,16 +118,32 @@ class HeadlessAgentService : Service() {
 
     override fun onDestroy() {
         shutdownRequested.set(true)
+        controller?.requestStop()
         lifecycleExecutor.shutdownNow()
 
         // Best effort only. Android force-stop, SIGKILL, and the Android 13+
-        // Task Manager stop do not guarantee onDestroy or evidence flushing.
-        controller?.closeWithin(ON_DESTROY_CLOSE_TIMEOUT_MILLIS)
-        if (::evidence.isInitialized) {
-            runCatching {
-                evidence.record(LifecycleEvent.SERVICE_DESTROYED, LifecycleTrigger.DESTROY)
+        // Task Manager stop do not guarantee onDestroy or evidence flushing. Neither controller
+        // monitor acquisition nor FileChannel fsync is allowed to block the Android main thread
+        // without a bound, so the ordered close/evidence attempt continues on a daemon worker.
+        val cleanupWorker =
+            Thread(
+                {
+                    controller?.closeWithin(ON_DESTROY_CLOSE_TIMEOUT_MILLIS)
+                    if (::evidence.isInitialized) {
+                        runCatching {
+                            evidence.record(
+                                LifecycleEvent.SERVICE_DESTROYED,
+                                LifecycleTrigger.DESTROY,
+                            )
+                        }
+                    }
+                },
+                "headless-on-destroy-cleanup",
+            ).apply {
+                isDaemon = true
+                start()
             }
-        }
+        runCatching { cleanupWorker.join(ON_DESTROY_CLOSE_TIMEOUT_MILLIS) }
         super.onDestroy()
     }
 
@@ -159,7 +177,8 @@ class HeadlessAgentService : Service() {
             when (controller?.start(trigger) ?: RuntimeStartResult.FAILED) {
                 RuntimeStartResult.STARTED,
                 RuntimeStartResult.ALREADY_STARTED,
-                -> publishRunningNotification()
+                -> if (!startAdmissionClosed.get()) publishRunningNotification()
+                RuntimeStartResult.CANCELLED -> Unit
                 RuntimeStartResult.FAILED -> performFailClosedStop()
             }
         } catch (_: Exception) {

@@ -7,6 +7,7 @@ import com.durendal.droneagent.core.control.CommandSaturationGate
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 
 data class ConsoleServerCoreConfig(
@@ -62,6 +63,11 @@ class ConsoleServerCore(
     private val pendingSessions = mutableSetOf<String>()
     private val commands = linkedMapOf<String, CommandRecord>()
     private val shutdownNeutralCompleted = CountDownLatch(1)
+    /**
+     * Terminal, process-lifetime fence for new actuation. Unlike readiness, this gate can never be
+     * reopened by a late runtime-state listener callback during shutdown.
+     */
+    private val actuationAdmissionClosed = AtomicBoolean(false)
 
     private var activeLease: ActiveLease? = null
     private var pendingLeaseSessionId: String? = null
@@ -83,6 +89,15 @@ class ConsoleServerCore(
     private var shutdownNeutralSucceeded = false
     private var shutdownRetryAttempted = false
     private var closed = false
+
+    /**
+     * Closes admission for every future lease or actuation attempt. This is deliberately limited
+     * to one atomic store so a lifecycle stop callback can always invoke it without waiting for a
+     * state lock, audit persistence, the executor, or an in-flight dispatch.
+     */
+    fun closeActuationAdmission() {
+        actuationAdmissionClosed.set(true)
+    }
 
     fun openSession(
         sessionId: String,
@@ -204,10 +219,14 @@ class ConsoleServerCore(
     }
 
     fun acquireLease(sessionId: String, requestedTtlMillis: Long): ConsoleLeaseState {
+        if (actuationAdmissionClosed.get()) {
+            return refusedLease(sessionId, ACTUATION_ADMISSION_CLOSED_REASON)
+        }
         expireDueWork()
         val denial = synchronized(lock) {
             when {
                 closed -> "server_closed"
+                actuationAdmissionClosed.get() -> ACTUATION_ADMISSION_CLOSED_REASON
                 sessionId !in sessions -> "unknown_session"
                 requestedTtlMillis !in config.minimumLeaseTtlMillis..config.maximumLeaseTtlMillis -> "invalid_lease_ttl"
                 auditFault -> "audit_unavailable"
@@ -260,7 +279,7 @@ class ConsoleServerCore(
         }
 
         val committed = synchronized(lock) {
-            if (closed || sessionId !in sessions || activeLease != null ||
+            if (closed || actuationAdmissionClosed.get() || sessionId !in sessions || activeLease != null ||
                 pendingLeaseSessionId != sessionId || !actuationReadiness.allowsLease(sessionId)
             ) {
                 pendingLeaseSessionId = null
@@ -285,11 +304,15 @@ class ConsoleServerCore(
         leaseId: String,
         requestedTtlMillis: Long,
     ): ConsoleLeaseState {
+        if (actuationAdmissionClosed.get()) {
+            return refusedLease(sessionId, ACTUATION_ADMISSION_CLOSED_REASON)
+        }
         expireDueWork()
         val selected = synchronized(lock) {
             val lease = activeLease
             when {
                 closed -> null to "server_closed"
+                actuationAdmissionClosed.get() -> null to ACTUATION_ADMISSION_CLOSED_REASON
                 sessionId !in sessions -> null to "unknown_session"
                 requestedTtlMillis !in config.minimumLeaseTtlMillis..config.maximumLeaseTtlMillis -> null to "invalid_lease_ttl"
                 auditFault -> null to "audit_unavailable"
@@ -325,7 +348,7 @@ class ConsoleServerCore(
             synchronized(lock) {
                 val now = monotonicClock.nowNanos()
                 when {
-                    closed || activeLease !== lease || sessionId !in sessions ||
+                    closed || actuationAdmissionClosed.get() || activeLease !== lease || sessionId !in sessions ||
                         !actuationReadiness.allowsLease(sessionId) -> {
                         lease.mutationPending = false
                         false
@@ -769,6 +792,8 @@ class ConsoleServerCore(
                     auditFault -> DiscreteDispatchAttempt.Refused("audit_unavailable")
                     neutralFault != null -> DiscreteDispatchAttempt.Refused("actuation_locked")
                     closed -> DiscreteDispatchAttempt.Refused("server_closed")
+                    actuationAdmissionClosed.get() ->
+                        DiscreteDispatchAttempt.Refused(ACTUATION_ADMISSION_CLOSED_REASON)
                     record.readinessEpoch != readinessEpoch ->
                         DiscreteDispatchAttempt.Refused("actuation_readiness_changed")
                     !actuationReadiness.allows(command.sessionId, command.command.action.actuationIntent) ->
@@ -784,6 +809,15 @@ class ConsoleServerCore(
             }
             if (gate != DiscreteDispatchAttempt.INVOKED) {
                 gate
+            } else if (actuationAdmissionClosed.get()) {
+                synchronized(lock) {
+                    commands[command.command.commandId]
+                        ?.takeIf {
+                            it.intentDigestSha256 == command.intentDigestSha256 &&
+                                it.state == CommandRecordState.EXECUTING
+                        }?.executionInvoked = false
+                }
+                DiscreteDispatchAttempt.Refused(ACTUATION_ADMISSION_CLOSED_REASON)
             } else {
                 try {
                     executor.executeDiscrete(command, callback::complete)
@@ -943,6 +977,7 @@ class ConsoleServerCore(
         val callback = DeferredCallback<ConsoleExecutionResult>()
         var expiredLease: LeaseTransition? = null
         var expiredControl: NeutralPlan? = null
+        var admissionClosedBeforeSubmit = false
         val submitted = synchronized(actuationDispatchLock) {
             val stillCurrent = synchronized(lock) {
                 val now = monotonicClock.nowNanos()
@@ -977,10 +1012,17 @@ class ConsoleServerCore(
                             ConsoleActuationIntent.VIRTUAL_STICK,
                         ) || neutralBarrierToken != null || activeDiscreteCommandId != null ||
                         auditFault || neutralFault != null || closed -> false
+                    actuationAdmissionClosed.get() -> {
+                        admissionClosedBeforeSubmit = true
+                        false
+                    }
                     else -> true
                 }
             }
             if (!stillCurrent) {
+                false
+            } else if (actuationAdmissionClosed.get()) {
+                admissionClosedBeforeSubmit = true
                 false
             } else {
                 try {
@@ -996,6 +1038,7 @@ class ConsoleServerCore(
                 when {
                     expiredLease != null -> "lease_ttl_expired"
                     expiredControl != null -> "control_ttl_expired"
+                    admissionClosedBeforeSubmit -> ACTUATION_ADMISSION_CLOSED_REASON
                     else -> "neutralized_before_submit"
                 }
             expiredLease?.let(::expireLease)
@@ -1160,6 +1203,7 @@ class ConsoleServerCore(
     }
 
     override fun close() {
+        closeActuationAdmission()
         var cancelledCommands: List<CommandRecord> = emptyList()
         var commandTasks: List<ConsoleScheduledTask> = emptyList()
         var stopNeutral: NeutralPlan? = null
@@ -1573,6 +1617,8 @@ class ConsoleServerCore(
     ): CompanionAdmissionRule =
         when {
             closed -> CompanionAdmissionRule.reject("server_closed")
+            actuationAdmissionClosed.get() ->
+                CompanionAdmissionRule.reject(ACTUATION_ADMISSION_CLOSED_REASON)
             sessionId !in sessions -> CompanionAdmissionRule.reject("unknown_session")
             ttlMillis !in config.minimumCommandTtlMillis..config.maximumCommandTtlMillis ->
                 CompanionAdmissionRule.reject("invalid_command_ttl")
@@ -1595,6 +1641,8 @@ class ConsoleServerCore(
         val lease = activeLease
         return when {
             closed -> CompanionAdmissionRule.reject("server_closed")
+            actuationAdmissionClosed.get() ->
+                CompanionAdmissionRule.reject(ACTUATION_ADMISSION_CLOSED_REASON)
             sessionId !in sessions -> CompanionAdmissionRule.reject("unknown_session")
             frame.ttlMillis !in config.minimumControlTtlMillis..config.maximumControlTtlMillis ->
                 CompanionAdmissionRule.reject("invalid_control_ttl")
@@ -2785,6 +2833,7 @@ class ConsoleServerCore(
     }
 
     companion object {
+        private const val ACTUATION_ADMISSION_CLOSED_REASON = "actuation_admission_closed"
         private const val NANOS_PER_MILLI = 1_000_000L
     }
 }

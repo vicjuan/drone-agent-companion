@@ -838,6 +838,229 @@ class ConsoleServerCoreTest {
     }
 
     @Test
+    fun `terminal admission gate returns while dispatch is blocked and fences every later control invocation`() {
+        val fixture = Fixture()
+        fixture.core.openSession("session-a")
+        val lease = checkNotNull(fixture.core.acquireLease("session-a", 5_000L).leaseId)
+        val dispatchEntered = CountDownLatch(1)
+        val releaseDispatch = CountDownLatch(1)
+        fixture.executor.beforeSubmitControl = {
+            dispatchEntered.countDown()
+            check(releaseDispatch.await(5L, TimeUnit.SECONDS)) { "timed out holding dispatch gate" }
+        }
+        val queuedThread = AtomicReference<Thread>()
+        val queuedStarted = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(3)
+
+        try {
+            val active =
+                pool.submit(Callable { fixture.core.handleControlFrame("session-a", frame(lease, 1L)) })
+            assertTrue(dispatchEntered.await(1L, TimeUnit.SECONDS))
+            assertEquals(1, fixture.executor.controlInvocations.get())
+
+            val queued =
+                pool.submit(
+                    Callable {
+                        queuedThread.set(Thread.currentThread())
+                        queuedStarted.countDown()
+                        fixture.core.handleControlFrame("session-a", frame(lease, 2L))
+                    },
+                )
+            assertTrue(queuedStarted.await(1L, TimeUnit.SECONDS))
+            awaitBlocked(checkNotNull(queuedThread.get()))
+
+            val admissionClosed =
+                pool.submit(
+                    Callable {
+                        fixture.core.closeActuationAdmission()
+                        true
+                    },
+                )
+            assertTrue(
+                "atomic admission close must not wait for the dispatch lock",
+                admissionClosed.get(1L, TimeUnit.SECONDS),
+            )
+            assertEquals(1, fixture.executor.controlInvocations.get())
+
+            releaseDispatch.countDown()
+            assertEquals(ConsoleControlStatus.APPLIED, active.get(1L, TimeUnit.SECONDS).status)
+            val rejected = queued.get(1L, TimeUnit.SECONDS)
+            assertEquals(ConsoleControlStatus.REJECTED, rejected.status)
+            assertEquals("actuation_admission_closed", rejected.reason)
+            assertEquals(1, fixture.executor.controlInvocations.get())
+
+            assertTrue(
+                fixture.core.updateActuationReadiness(
+                    ConsoleActuationReadinessSnapshot.MOCK_READY.copy(
+                        actuationLock = ActuationLockState.LOCKED,
+                    ),
+                ),
+            )
+            assertEquals(
+                listOf(ConsoleSafetyTrigger.ACTUATION_READINESS_LOST),
+                fixture.executor.neutralCalls.map { it.second },
+            )
+
+            // A late listener may republish the old ready state, but the terminal gate stays shut.
+            assertTrue(fixture.core.updateActuationReadiness(ConsoleActuationReadinessSnapshot.MOCK_READY))
+            val afterReadyAba = fixture.core.acquireLease("session-a", 5_000L)
+            assertEquals(ConsoleLeaseStatus.DENIED, afterReadyAba.status)
+            assertEquals("actuation_admission_closed", afterReadyAba.reason)
+        } finally {
+            releaseDispatch.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `terminal admission gate fences lease command and control commits blocked on durable audit`() {
+        val acquireFixture = Fixture()
+        acquireFixture.core.openSession("session-a")
+        acquireFixture.audit.blockKind = ConsoleAuditKind.LEASE_ACQUIRED
+        val acquirePool = Executors.newSingleThreadExecutor()
+        try {
+            val acquisition =
+                acquirePool.submit(Callable { acquireFixture.core.acquireLease("session-a", 5_000L) })
+            assertTrue(acquireFixture.audit.blockEntered.await(1L, TimeUnit.SECONDS))
+            acquireFixture.core.closeActuationAdmission()
+            acquireFixture.audit.unblock.countDown()
+            val denied = acquisition.get(1L, TimeUnit.SECONDS)
+            assertEquals(ConsoleLeaseStatus.DENIED, denied.status)
+            assertNull(acquireFixture.core.currentLease())
+        } finally {
+            acquireFixture.audit.unblock.countDown()
+            acquirePool.shutdownNow()
+        }
+
+        val renewFixture = Fixture()
+        renewFixture.core.openSession("session-a")
+        val renewLease = checkNotNull(renewFixture.core.acquireLease("session-a", 5_000L).leaseId)
+        renewFixture.audit.blockKind = ConsoleAuditKind.LEASE_RENEWED
+        val renewPool = Executors.newSingleThreadExecutor()
+        try {
+            val renewal =
+                renewPool.submit(
+                    Callable { renewFixture.core.renewLease("session-a", renewLease, 5_000L) },
+                )
+            assertTrue(renewFixture.audit.blockEntered.await(1L, TimeUnit.SECONDS))
+            renewFixture.core.closeActuationAdmission()
+            renewFixture.audit.unblock.countDown()
+            assertEquals(ConsoleLeaseStatus.DENIED, renewal.get(1L, TimeUnit.SECONDS).status)
+        } finally {
+            renewFixture.audit.unblock.countDown()
+            renewPool.shutdownNow()
+        }
+
+        val commandFixture = Fixture()
+        commandFixture.core.openSession("session-a")
+        val commandLease = checkNotNull(commandFixture.core.acquireLease("session-a", 5_000L).leaseId)
+        commandFixture.audit.blockKind = ConsoleAuditKind.COMMAND_ADMITTED
+        val commandPool = Executors.newSingleThreadExecutor()
+        try {
+            val command =
+                commandPool.submit(
+                    Callable {
+                        commandFixture.core.handleDiscreteCommand(
+                            "session-a",
+                            ConsoleDiscreteCommand(
+                                "stop-during-command-audit",
+                                commandLease,
+                                ConsoleDiscreteAction.TAKEOFF,
+                                1_000L,
+                            ),
+                        )
+                    },
+                )
+            assertTrue(commandFixture.audit.blockEntered.await(1L, TimeUnit.SECONDS))
+            commandFixture.core.closeActuationAdmission()
+            commandFixture.audit.unblock.countDown()
+            assertEquals(ConsoleCommandDecision.REJECTED, command.get(1L, TimeUnit.SECONDS).decision)
+            assertTrue(commandFixture.executor.discrete.isEmpty())
+        } finally {
+            commandFixture.audit.unblock.countDown()
+            commandPool.shutdownNow()
+        }
+
+        val controlFixture = Fixture()
+        controlFixture.core.openSession("session-a")
+        val controlLease = checkNotNull(controlFixture.core.acquireLease("session-a", 5_000L).leaseId)
+        controlFixture.audit.blockKind = ConsoleAuditKind.CONTROL_ADMITTED
+        val controlPool = Executors.newSingleThreadExecutor()
+        try {
+            val control =
+                controlPool.submit(
+                    Callable { controlFixture.core.handleControlFrame("session-a", frame(controlLease, 1L)) },
+                )
+            assertTrue(controlFixture.audit.blockEntered.await(1L, TimeUnit.SECONDS))
+            controlFixture.core.closeActuationAdmission()
+            controlFixture.audit.unblock.countDown()
+            assertEquals(ConsoleControlStatus.REJECTED, control.get(1L, TimeUnit.SECONDS).status)
+            assertTrue(controlFixture.executor.controls.isEmpty())
+        } finally {
+            controlFixture.audit.unblock.countDown()
+            controlPool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `terminal gate fences final discrete and control dispatch without blocking safety paths`() {
+        val discrete = Fixture()
+        discrete.executor.completeNeutralImmediately = false
+        discrete.core.openSession("session-a")
+        val discreteLease = checkNotNull(discrete.core.acquireLease("session-a", 5_000L).leaseId)
+        discrete.core.handleDiscreteCommand(
+            "session-a",
+            ConsoleDiscreteCommand(
+                "stop-before-discrete-dispatch",
+                discreteLease,
+                ConsoleDiscreteAction.TAKEOFF,
+                1_000L,
+            ),
+        )
+        discrete.core.closeActuationAdmission()
+        discrete.executor.completeNextNeutral(ConsoleExecutionResult(true, detail = "pre-action neutral"))
+        assertTrue(discrete.executor.discrete.isEmpty())
+        val commandResult =
+            discrete.events.events.mapNotNull { it.second as? ConsoleCoreEvent.CommandCompleted }
+                .single().result
+        assertEquals("actuation_admission_closed", commandResult.reason)
+
+        val control = Fixture()
+        control.core.openSession("session-a")
+        val controlLease = checkNotNull(control.core.acquireLease("session-a", 5_000L).leaseId)
+        control.scheduler.afterNextSchedule = { control.core.closeActuationAdmission() }
+        val controlAck = control.core.handleControlFrame("session-a", frame(controlLease, 1L))
+        assertEquals(ConsoleControlStatus.REJECTED, controlAck.status)
+        assertEquals("actuation_admission_closed", controlAck.reason)
+        assertTrue(control.executor.controls.isEmpty())
+
+        val neutral = Fixture()
+        neutral.core.openSession("session-a")
+        val neutralLease = checkNotNull(neutral.core.acquireLease("session-a", 5_000L).leaseId)
+        neutral.core.handleControlFrame("session-a", frame(neutralLease, 1L))
+        neutral.core.closeActuationAdmission()
+        neutral.core.handleControlNeutral(
+            "session-a",
+            ConsoleControlNeutral(neutralLease, 2L, ConsoleNeutralRequestReason.OPERATOR_RELEASE),
+        )
+        assertEquals(1, neutral.executor.neutralCalls.size)
+
+        val release = Fixture()
+        release.core.openSession("session-a")
+        val releaseLease = checkNotNull(release.core.acquireLease("session-a", 5_000L).leaseId)
+        release.core.closeActuationAdmission()
+        assertEquals(ConsoleLeaseStatus.RELEASED, release.core.releaseLease("session-a", releaseLease).status)
+        assertEquals(ConsoleSafetyTrigger.CLIENT_REQUEST, release.executor.neutralCalls.single().second)
+
+        val close = Fixture()
+        close.core.openSession("session-a")
+        close.core.acquireLease("session-a", 5_000L)
+        close.core.closeActuationAdmission()
+        close.core.close()
+        assertEquals(ConsoleSafetyTrigger.SERVER_STOP, close.executor.neutralCalls.single().second)
+    }
+
+    @Test
     fun `neutral request emits applied ack only after the barrier completes`() {
         val fixture = Fixture()
         fixture.executor.completeNeutralImmediately = false
@@ -1572,6 +1795,7 @@ class ConsoleServerCoreTest {
         val neutralCalls = mutableListOf<Pair<String, ConsoleSafetyTrigger>>()
         val neutralEpochs = mutableListOf<Long>()
         val operations = mutableListOf<String>()
+        val controlInvocations = AtomicInteger()
         private val pendingDiscrete = ArrayDeque<(ConsoleExecutionResult) -> Unit>()
         private val pendingNeutral = ArrayDeque<(ConsoleExecutionResult) -> Unit>()
         private var maximumNeutralizedEpoch = -1L
@@ -1603,6 +1827,7 @@ class ConsoleServerCoreTest {
             frame: AdmittedControlFrame,
             callback: (ConsoleExecutionResult) -> Unit,
         ) {
+            controlInvocations.incrementAndGet()
             beforeSubmitControl?.invoke()
             controlFailure?.let { throw it }
             if (frame.controlEpoch <= maximumNeutralizedEpoch) {

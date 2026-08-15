@@ -5,6 +5,7 @@ import com.durendal.droneagent.companion.capability.RequiredG520Capabilities
 import com.durendal.droneagent.companion.console.protocol.ActuationLockState
 import com.durendal.droneagent.companion.console.protocol.AdapterKind
 import com.durendal.droneagent.companion.console.protocol.AircraftConnectionState
+import com.durendal.droneagent.companion.console.protocol.CapabilitySnapshotPayload
 import com.durendal.droneagent.companion.console.protocol.FlightState
 import com.durendal.droneagent.companion.console.protocol.OperatingProfile
 import com.durendal.droneagent.core.model.BatteryTelemetry
@@ -14,6 +15,10 @@ import com.durendal.droneagent.core.model.FlightStateTelemetry
 import com.durendal.droneagent.core.model.GimbalState
 import com.durendal.droneagent.core.model.PositionTelemetry
 import com.durendal.droneagent.core.model.Telemetry
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -80,6 +85,90 @@ class MockConsoleSnapshotProviderTest {
             now += 5_000_000L
             assertTrue(snapshots.health().uptimeMs >= 5L)
         } finally {
+            agent.shutdown()
+        }
+    }
+
+    @Test
+    fun `runtime health and telemetry paths do not load the capability snapshot`() {
+        val agent = MockDroneAgent()
+        val loadCalls = AtomicInteger()
+        val snapshots =
+            MockConsoleSnapshotProvider(
+                agent,
+                ObservableMockReturnToHomePort(),
+                capabilitySnapshotLoader = {
+                    loadCalls.incrementAndGet()
+                    error("capability snapshot must remain lazy")
+                },
+                monotonicClockNanos = { 1_000_000L },
+            )
+        try {
+            snapshots.runtimeState()
+            snapshots.health()
+            snapshots.mapTelemetry(Telemetry(timestampEpochMs = 1_700_000_000_000L))
+
+            assertEquals(0, loadCalls.get())
+        } finally {
+            agent.shutdown()
+        }
+    }
+
+    @Test
+    fun `capability snapshot loads once across concurrent first readers`() {
+        val agent = MockDroneAgent()
+        val loadCalls = AtomicInteger()
+        val loaderEntered = CountDownLatch(1)
+        val releaseLoader = CountDownLatch(1)
+        val expected =
+            CapabilitySnapshotPayload(
+                matrixId = "lazy-test",
+                schemaVersion = 1,
+                lastUpdated = "2026-08-15",
+                sourceDigestSha256 = "a".repeat(64),
+                rows = emptyList(),
+            )
+        val snapshots =
+            MockConsoleSnapshotProvider(
+                agent,
+                ObservableMockReturnToHomePort(),
+                capabilitySnapshotLoader = {
+                    loadCalls.incrementAndGet()
+                    loaderEntered.countDown()
+                    check(releaseLoader.await(5L, TimeUnit.SECONDS)) {
+                        "timed out waiting to release capability loader"
+                    }
+                    expected
+                },
+            )
+        val callers = Executors.newFixedThreadPool(8)
+        val callersReady = CountDownLatch(8)
+        val startCallers = CountDownLatch(1)
+        try {
+            val results =
+                List(8) {
+                    callers.submit<CapabilitySnapshotPayload> {
+                        callersReady.countDown()
+                        check(startCallers.await(5L, TimeUnit.SECONDS)) {
+                            "timed out waiting to start capability readers"
+                        }
+                        snapshots.capabilitySnapshot()
+                    }
+                }
+
+            assertTrue(callersReady.await(5L, TimeUnit.SECONDS))
+            assertEquals(0, loadCalls.get())
+            startCallers.countDown()
+            assertTrue(loaderEntered.await(5L, TimeUnit.SECONDS))
+            releaseLoader.countDown()
+
+            assertTrue(results.all { it.get(5L, TimeUnit.SECONDS) === expected })
+            assertTrue(snapshots.capabilitySnapshot() === expected)
+            assertEquals(1, loadCalls.get())
+        } finally {
+            startCallers.countDown()
+            releaseLoader.countDown()
+            callers.shutdownNow()
             agent.shutdown()
         }
     }

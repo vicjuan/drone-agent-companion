@@ -1,9 +1,17 @@
 package com.durendal.droneagent.companion.host
 
+import java.util.concurrent.atomic.AtomicBoolean
+
 /** A fully composed runtime owned by the foreground service. */
 interface HeadlessRuntime {
-    /** Starts listeners and command handling. This method must fail closed. */
+    /** Immediately closes command admission without blocking or throwing; ordered cleanup follows. */
+    fun requestStop()
+
+    /** Starts listeners and transports while keeping actuation locked and telemetry stopped. */
     fun start()
+
+    /** Opens startup actuation readiness after its durable controller commit. This is stop-aware. */
+    fun admitActuation()
 
     /**
      * Stops accepting work, returns actuation to neutral, and releases resources.
@@ -33,6 +41,7 @@ enum class RuntimeCloseResult {
 enum class RuntimeStartResult {
     STARTED,
     ALREADY_STARTED,
+    CANCELLED,
     FAILED,
 }
 
@@ -52,14 +61,27 @@ class HeadlessRuntimeController(
     private val factory: HeadlessRuntimeFactory,
     private val evidence: DurableLifecycleEvidence,
 ) {
-    private var runtime: HeadlessRuntime? = null
+    @Volatile private var runtime: HeadlessRuntime? = null
     private var pendingClosedOutcomeEvidence = false
+    private val stopRequested = AtomicBoolean(false)
+
+    /** Closes startup admission without waiting behind slow factory or runtime initialization. */
+    fun requestStop() {
+        stopRequested.set(true)
+        // Implementations must close their server-owned admission gate before returning. Cleanup
+        // remains on the lifecycle executor so connector/neutral/audit ordering stays serialized.
+        runtime?.let(::signalRuntimeStop)
+    }
 
     @Synchronized
     fun start(trigger: LifecycleTrigger): RuntimeStartResult {
         if (runtime != null) return RuntimeStartResult.ALREADY_STARTED
 
         evidence.record(LifecycleEvent.RUNTIME_START_REQUESTED, trigger)
+        if (stopRequested.get()) {
+            evidence.record(LifecycleEvent.RUNTIME_START_CANCELLED, LifecycleTrigger.SAFE_STOP)
+            return RuntimeStartResult.CANCELLED
+        }
         val candidate =
             try {
                 factory.create()
@@ -67,31 +89,59 @@ class HeadlessRuntimeController(
                 evidence.record(LifecycleEvent.RUNTIME_FACTORY_FAILED, trigger)
                 return RuntimeStartResult.FAILED
             }
-
         // Retain ownership before start(): a throwing start may still have opened
         // sockets or actuation resources, and a timed-out cleanup must be retried.
         runtime = candidate
         try {
+            evidence.record(LifecycleEvent.RUNTIME_FACTORY_CREATED, trigger)
+        } catch (evidenceFailure: Throwable) {
+            closeCancelledStartup(candidate)
+            throw evidenceFailure
+        }
+        if (stopRequested.get()) {
+            closeCancelledStartup(candidate)
+            evidence.record(LifecycleEvent.RUNTIME_START_CANCELLED, LifecycleTrigger.SAFE_STOP)
+            return RuntimeStartResult.CANCELLED
+        }
+        try {
             candidate.start()
         } catch (_: Throwable) {
-            // start() may have partially allocated resources.
-            val cleanup =
-                runCatching { candidate.closeWithin(START_FAILURE_CLOSE_TIMEOUT_MILLIS) }
-                    .getOrDefault(RuntimeCloseResult.FAILED)
-            if (cleanup == RuntimeCloseResult.CLOSED) runtime = null
-            evidence.record(LifecycleEvent.RUNTIME_START_FAILED, trigger)
-            return RuntimeStartResult.FAILED
+            val cancelled = stopRequested.get()
+            return finishIncompleteStartup(candidate, trigger, cancelled)
+        }
+
+        if (stopRequested.get()) {
+            return finishIncompleteStartup(candidate, trigger, cancelled = true)
+        }
+
+        try {
+            evidence.record(LifecycleEvent.RUNTIME_ADMISSION_COMMITTED, trigger)
+        } catch (_: Throwable) {
+            val cancelled = stopRequested.get()
+            return finishIncompleteStartup(candidate, trigger, cancelled)
+        }
+        if (stopRequested.get()) {
+            return finishIncompleteStartup(candidate, trigger, cancelled = true)
+        }
+
+        try {
+            candidate.admitActuation()
+        } catch (_: Throwable) {
+            val cancelled = stopRequested.get()
+            return finishIncompleteStartup(candidate, trigger, cancelled)
+        }
+        if (stopRequested.get()) {
+            return finishIncompleteStartup(candidate, trigger, cancelled = true)
         }
 
         try {
             evidence.record(LifecycleEvent.RUNTIME_STARTED, trigger)
-        } catch (evidenceFailure: Throwable) {
-            // A runtime without durable lifecycle evidence is not admitted.
-            val cleanup =
-                runCatching { candidate.closeWithin(START_FAILURE_CLOSE_TIMEOUT_MILLIS) }
-                    .getOrDefault(RuntimeCloseResult.FAILED)
-            if (cleanup == RuntimeCloseResult.CLOSED) runtime = null
-            throw evidenceFailure
+        } catch (_: Throwable) {
+            val cancelled = stopRequested.get()
+            return finishIncompleteStartup(candidate, trigger, cancelled)
+        }
+        if (stopRequested.get()) {
+            return finishIncompleteStartup(candidate, trigger, cancelled = true)
         }
         return RuntimeStartResult.STARTED
     }
@@ -112,6 +162,8 @@ class HeadlessRuntimeController(
             return RuntimeCloseResult.CLOSED
         }
         val current = runtime ?: return RuntimeCloseResult.CLOSED
+        stopRequested.set(true)
+        signalRuntimeStop(current)
 
         // Lifecycle evidence is intentionally written after the close attempt. A full or locked
         // journal must never delay connector shutdown or the runtime's neutral barrier.
@@ -148,6 +200,40 @@ class HeadlessRuntimeController(
 
     @Synchronized
     internal fun hasPendingCloseEvidence(): Boolean = pendingClosedOutcomeEvidence
+
+    private fun closeCancelledStartup(candidate: HeadlessRuntime) {
+        signalRuntimeStop(candidate)
+        val cleanup =
+            runCatching { candidate.closeWithin(START_FAILURE_CLOSE_TIMEOUT_MILLIS) }
+                .getOrDefault(RuntimeCloseResult.FAILED)
+        if (cleanup == RuntimeCloseResult.CLOSED) runtime = null
+    }
+
+    private fun finishIncompleteStartup(
+        candidate: HeadlessRuntime,
+        trigger: LifecycleTrigger,
+        cancelled: Boolean,
+    ): RuntimeStartResult {
+        signalRuntimeStop(candidate)
+        val cleanup =
+            runCatching { candidate.closeWithin(START_FAILURE_CLOSE_TIMEOUT_MILLIS) }
+                .getOrDefault(RuntimeCloseResult.FAILED)
+        if (cleanup == RuntimeCloseResult.CLOSED) runtime = null
+        val cancellationObserved = cancelled || stopRequested.get()
+        evidence.record(
+            if (cancellationObserved) LifecycleEvent.RUNTIME_START_CANCELLED
+            else LifecycleEvent.RUNTIME_START_FAILED,
+            if (cancellationObserved) LifecycleTrigger.SAFE_STOP else trigger,
+        )
+        return if (cancellationObserved) RuntimeStartResult.CANCELLED else RuntimeStartResult.FAILED
+    }
+
+    private fun signalRuntimeStop(candidate: HeadlessRuntime) {
+        // requestStop() is a best-effort emergency signal on an Android callback path. Keep the
+        // controller non-throwing even if an injected implementation violates that contract;
+        // ordered closeWithin() still runs on the lifecycle executor.
+        runCatching { candidate.requestStop() }
+    }
 
     private companion object {
         const val START_FAILURE_CLOSE_TIMEOUT_MILLIS = 1_000L
