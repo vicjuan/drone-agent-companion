@@ -27,6 +27,7 @@ rootProject.name = "drone-agent-companion"
 include(":console-protocol")
 include(":capability-matrix")
 include(":console-server")
+include(":console-adapter-mock")
 include(":console-runner")
 include(":vision-opencv-core")
 include(":vision-opencv-desktop")

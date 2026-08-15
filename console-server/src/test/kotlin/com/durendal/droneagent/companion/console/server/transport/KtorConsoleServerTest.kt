@@ -14,6 +14,11 @@ import io.ktor.websocket.readText
 import io.ktor.websocket.send
 import java.nio.file.Files
 import java.nio.file.Path
+import java.net.InetAddress
+import java.net.HttpURLConnection
+import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.net.URL
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Assert.assertEquals
@@ -24,6 +29,59 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class KtorConsoleServerTest {
+    @Test
+    fun `real engine reclaims its fixed loopback port after bounded close`() {
+        val port = ServerSocket(0).use { it.localPort }
+        val webRoot = Files.createTempDirectory("console-port-restart")
+        Files.writeString(webRoot.resolve("index.html"), "<html>restart</html>")
+
+        repeat(2) {
+            val server =
+                KtorConsoleServer(
+                    ConsoleServerConfig(
+                        bindHost = "127.0.0.1",
+                        bindPort = port,
+                        webRoot = webRoot,
+                        startupTimeoutMillis = 2_000L,
+                    ),
+                    RecordingController(),
+                )
+            server.start(wait = false)
+            val connection =
+                URL("http://127.0.0.1:$port${ConsoleRoutes.HEALTH}")
+                    .openConnection() as HttpURLConnection
+            try {
+                assertEquals(HttpStatusCode.OK.value, connection.responseCode)
+                assertEquals("{\"status\":\"ok\"}", connection.inputStream.bufferedReader().use { it.readText() })
+            } finally {
+                server.closeWithin(1_000L)
+                connection.disconnect()
+            }
+        }
+    }
+
+    @Test
+    fun `real engine reports a loopback port collision before start returns`() {
+        val occupied = ServerSocket()
+        occupied.reuseAddress = false
+        occupied.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0))
+        occupied.use { socket ->
+            val server =
+                KtorConsoleServer(
+                    ConsoleServerConfig(
+                        bindHost = "127.0.0.1",
+                        bindPort = socket.localPort,
+                        webRoot = Files.createTempDirectory("console-port-collision"),
+                        startupTimeoutMillis = 2_000L,
+                    ),
+                    RecordingController(),
+                )
+
+            assertThrows(IllegalStateException::class.java) { server.start(wait = false) }
+            runCatching { server.close() }
+        }
+    }
+
     @Test
     fun `wildcard bind is rejected before an engine can expose the console`() {
         for (

@@ -54,3 +54,6 @@ jobs:
 
       - name: Build and test web console
         run: npm test --prefix web-console
+
+      - name: Test forwarded WebSocket evidence helper
+        run: node --test scripts/verify-forwarded-console.test.mjs

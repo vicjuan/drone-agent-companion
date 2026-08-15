@@ -1,4 +1,4 @@
-package com.durendal.droneagent.companion.console.runner
+package com.durendal.droneagent.companion.console.mock
 
 import com.durendal.droneagent.adapter.mock.MockDroneAgent
 import com.durendal.droneagent.companion.capability.RequiredG520Capabilities
@@ -89,6 +89,7 @@ class MockConsoleSnapshotProviderTest {
         val agent = MockDroneAgent()
         val rthPort = ObservableMockReturnToHomePort()
         val snapshots = MockConsoleSnapshotProvider(agent, rthPort)
+        val executor = MockConsoleCommandExecutor(agent, { 1L }, rthPort)
         val command =
             com.durendal.droneagent.companion.console.server.AdmittedDiscreteCommand(
                 sessionId = "session-1",
@@ -105,7 +106,7 @@ class MockConsoleSnapshotProviderTest {
                 expiresAtNanos = 2L,
             )
         try {
-            rthPort.execute(command) { assertTrue(it.succeeded) }
+            executor.executeDiscrete(command) { assertTrue(it.succeeded) }
             val telemetry =
                 snapshots.mapTelemetry(
                     Telemetry(
@@ -117,6 +118,7 @@ class MockConsoleSnapshotProviderTest {
             assertEquals(FlightState.RETURNING_HOME, telemetry.flightState)
             assertEquals("rth-observable", rthPort.activeCommandId())
         } finally {
+            executor.close()
             agent.shutdown()
         }
     }

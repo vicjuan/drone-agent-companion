@@ -1,6 +1,9 @@
 package com.durendal.droneagent.companion.console.runner
 
 import com.durendal.droneagent.adapter.mock.MockDroneAgent
+import com.durendal.droneagent.companion.console.mock.MockConsoleCommandExecutor
+import com.durendal.droneagent.companion.console.mock.MockConsoleSnapshotProvider
+import com.durendal.droneagent.companion.console.mock.ObservableMockReturnToHomePort
 import com.durendal.droneagent.companion.console.protocol.AdapterKind
 import com.durendal.droneagent.companion.console.protocol.ClientHelloPayload
 import com.durendal.droneagent.companion.console.protocol.CommandAckPayload

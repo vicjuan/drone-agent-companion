@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      The mock foreground host probes and serves only its own IPv4 loopback socket.
+      Keep every non-loopback cleartext destination denied; the later G520 Ethernet
+      commissioning profile must define its own explicit interface/origin boundary.
+    -->
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

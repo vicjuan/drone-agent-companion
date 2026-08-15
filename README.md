@@ -31,6 +31,8 @@ touch UI is replaced by an on-device web server operated from a browser.
   Control MVP-first coding order, with per-step completion criteria.
 - [`docs/capability-matrix.md`](docs/capability-matrix.md): generated human-readable
   view of the canonical G520 evidence matrix.
+- [`docs/headless-emulator-runbook.md`](docs/headless-emulator-runbook.md): frozen API 34
+  emulator build/runtime procedure and the force-stop safety boundary.
 
 ## Workspace bootstrap
 

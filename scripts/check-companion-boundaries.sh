@@ -16,7 +16,7 @@ if [[ -n "$(git -C "$VENDOR_ROOT" status --porcelain)" ]]; then
     exit 1
 fi
 
-for module in capability-matrix console-protocol console-server; do
+for module in capability-matrix console-protocol console-server console-adapter-mock; do
     source_root="$REPO_ROOT/$module/src"
     if rg -n --glob '*.kt' \
         '^[[:space:]]*import[[:space:]]+(android|androidx|dji|org\.opencv)(\.|$)' \
@@ -30,6 +30,27 @@ if rg -n \
     'com\.durendal\.droneagent:|project\(":(core|gateway|vision|drone-actuation|adapter)' \
     "$REPO_ROOT/console-protocol/build.gradle.kts"; then
     echo "[companion-boundary] console-protocol must not depend on vendor implementation modules" >&2
+    exit 1
+fi
+
+if rg -n --glob '*.kt' \
+    '^[[:space:]]*import[[:space:]]+(com\.durendal\.droneagent\.(adapter\.mock|companion\.console\.mock)|dji)(\.|$)' \
+    "$REPO_ROOT/host-headless/src/main"; then
+    echo "[companion-boundary] Android common source must remain free of mock and DJI implementations" >&2
+    exit 1
+fi
+
+if rg -n \
+    '^[[:space:]]*implementation\((project\(":console-adapter-mock"\)|"com\.durendal\.droneagent:adapter-mock:)' \
+    "$REPO_ROOT/host-headless/build.gradle.kts"; then
+    echo "[companion-boundary] mock adapter dependencies must remain mock-flavor-only" >&2
+    exit 1
+fi
+
+if ! rg -q \
+    '"mockImplementation"\(project\(":console-adapter-mock"\)\)' \
+    "$REPO_ROOT/host-headless/build.gradle.kts"; then
+    echo "[companion-boundary] mock flavor must consume the shared console-adapter-mock module" >&2
     exit 1
 fi
 

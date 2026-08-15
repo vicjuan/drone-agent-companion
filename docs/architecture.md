@@ -27,10 +27,11 @@ G520（Android，無螢幕）
   ├─ host-headless（Android app）
   │    ├─ 開機自啟 foreground service，無 Activity UI 依賴
   │    ├─ console-server ── 靜態 SPA 與 WS 端點，命令送進既有 admission 政策
+  │    ├─ console-adapter-mock ── Mac／Android mock flavor 共用 execution + snapshot
   │    ├─ gateway ── 維持 client，連出去接 drone-platform（協定不動）
   │    ├─ adapter-dji（MSDK V5）／adapter-mock（product flavor 隔離，沿用）
   │    ├─ vision-opencv-* ── OpenCV backend + desktop/Android native runtime
-  │    └─ evidence logging（沿用）
+  │    └─ companion-owned console／lifecycle evidence logging
   ├─ 影像鏈：RTMP → MediaMTX → WHEP（MediaMTX 位置待決，見 open decisions）
   │  USB
   ▼
@@ -57,6 +58,11 @@ JSON、投影上游五個 `core` capability，並產生 Markdown。`console-serv
 immutable snapshot；`web-console` build 複製同一 JSON。即時 adapter／connection／
 actuation lock／lease 狀態是另一份 runtime 資料，不得覆寫 evidence status。
 
+`console-adapter-mock` 也是 pure-JVM；它持有 Mac runner 與 Android mock flavor 共用的
+command executor、snapshot provider 與明確標示為 simulation 的 RTH port。Android common
+source set 不依賴 mock；只有 `mockImplementation` 與 `src/mock` composition 可看見它，避免
+未來 DJI artifact 靜默包入 mock 執行路徑。
+
 ## Weekend console 實作切片
 
 瀏覽器 console 使用本 repo 自有的 versioned wire contract，與凍結的
@@ -65,9 +71,11 @@ Kotlin 與 TypeScript 共讀 canonical fixtures 與 digest；decoder 對方向�
 64 KiB frame 上限與 JSON nesting 深度均 fail-closed。瀏覽器 payload 無法提供或
 覆寫 authority decision、adapter、aircraft connection、actuation lock 或 operating profile。
 
-JVM runner 已選用 Ktor CIO，並實作靜態 SPA 與 `/api/console/v1` WebSocket。
-目前這個選型只在 Mac/JVM 驗證；Android engine compatibility 與 APK 體積屬 #2，
-未經 emulator/G520 驗證前不宣稱 Android 可用。localhost profile 另有以下邊界：
+JVM runner 已選用 Ktor CIO，並實作靜態 SPA 與 `/api/console/v1` WebSocket。Android
+mock flavor 也已接上同一 server、content-addressed SPA assets 與 runtime composition；
+目前只有 Android source/targeted compile 證據，Ktor engine compatibility、APK 體積、
+boot/restart 仍須 frozen API 34 emulator lane。即使 emulator 通過，也不代表 G520 可用。
+localhost profile 另有以下邊界：
 
 - server 固定允許的 browser `Origin`，不從請求 `Host` 推導；missing、`null`、
   錯 host/port 或重複 `Origin` 在建立 session 前即拒絕；
@@ -77,6 +85,8 @@ JVM runner 已選用 Ktor CIO，並實作靜態 SPA 與 `/api/console/v1` WebSoc
   handshake 期間狀態變更不會讓新 client 永久 stale；
 - 單一 operator lease 是全域事實；`HELD`、`RELEASED`、`EXPIRED` 廣播給
   READY clients，`DENIED` 只是 requester receipt，不會覆寫 UI 的全域 lease truth。
+- CIO 關閉 address reuse，且 `start(false)` 以 instance-specific readiness token 確認
+  自己確實擁有 connector；port collision 不得留下「running」假狀態。
 
 ## OpenCV on-device 視覺決策
 
@@ -144,6 +154,16 @@ closed-loop-not-executed guard）隨 submodule 一併生效，CI 必須執行。
    executor 前均重驗 adapter、aircraft connection、actuation lock、operating profile 與
    monotonic readiness epoch。Mock 只在 localhost + connected + unlocked 放行；DJI 只有
    受控 hardware commissioning allowlist 可放行，一般 operational profile 預設拒絕。
+8. **Android process recovery 不是 aircraft failsafe。** foreground service、server dead-man
+   與 mock/DJI composition 位於同一 `:agent` process；該 process 死亡後，app 本身不可能再
+   發 neutral。`START_STICKY` 只恢復 host，且沒有固定 SLA。進 DJI commissioning 前，必須
+   以第一手真機 evidence 證明 adapter／aircraft 在 input/process loss 時回 neutral 或安全
+   模式；否則致動維持鎖住。
+9. **Force-stop 必須維持停止。** Android `force-stop` 會把 package 設成 stopped state，
+   app 內 receiver、alarm、service 或 watchdog 都不能解除。一般 process death 是正向
+   recovery 測試；force-stop 是負向安全測試，只有使用者或外部 supervisor 的明確啟動可
+   恢復。安全停止 action 必須在 stopForeground/stopSelf 前 bounded neutral、close 並 fsync
+   evidence。
 
 ## 已決定的網路拓樸
 

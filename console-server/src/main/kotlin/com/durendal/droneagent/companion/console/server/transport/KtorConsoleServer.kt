@@ -23,6 +23,11 @@ import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import io.ktor.websocket.send
 import java.net.InetAddress
+import java.net.HttpURLConnection
+import java.net.Proxy
+import java.net.URL
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -40,6 +45,8 @@ data class ConsoleServerConfig(
     val webRoot: Path,
     val maxTextFrameBytes: Int = 64 * 1024,
     val allowedBrowserOrigin: String = browserOrigin("http", bindHost, bindPort),
+    val startupTimeoutMillis: Long = 10_000L,
+    val startupProbeToken: String = UUID.randomUUID().toString(),
 ) {
     init {
         require(bindHost.isNotBlank()) { "bindHost must not be blank" }
@@ -50,11 +57,18 @@ data class ConsoleServerConfig(
         require(maxTextFrameBytes in 1..MAX_ALLOWED_TEXT_FRAME_BYTES) {
             "maxTextFrameBytes must be between 1 and $MAX_ALLOWED_TEXT_FRAME_BYTES"
         }
+        require(startupTimeoutMillis in 100L..60_000L) {
+            "startupTimeoutMillis must be between 100 and 60000"
+        }
+        require(STARTUP_PROBE_TOKEN.matches(startupProbeToken)) {
+            "startupProbeToken must be a bounded opaque identifier"
+        }
         requireCanonicalBrowserOrigin(allowedBrowserOrigin)
     }
 
     private companion object {
         const val MAX_ALLOWED_TEXT_FRAME_BYTES = 1024 * 1024
+        val STARTUP_PROBE_TOKEN = Regex("^[A-Za-z0-9_-]{16,64}$")
     }
 }
 
@@ -97,10 +111,11 @@ interface ConsoleSocketController {
 
 object ConsoleRoutes {
     const val HEALTH = "/healthz"
+    const val READINESS = "/readyz"
     const val WEBSOCKET = "/api/console/v1"
 }
 
-/** JDK-only Ktor CIO host used by console-runner; Android engine validation remains separate. */
+/** Ktor CIO host shared by the Mac runner and the Android emulator candidate. */
 class KtorConsoleServer(
     private val config: ConsoleServerConfig,
     controller: ConsoleSocketController,
@@ -110,16 +125,90 @@ class KtorConsoleServer(
             factory = CIO,
             host = config.bindHost,
             port = config.bindPort,
+            configure = {
+                // A command server must have exclusive ownership of its bind tuple. CIO defaults
+                // to address reuse, which can permit two listeners on the same port on some hosts
+                // and make an HTTP readiness probe observe the wrong process.
+                reuseAddress = false
+            },
         ) {
             installConsoleApplication(config, controller)
         }
 
     fun start(wait: Boolean = false) {
-        engine.start(wait = wait)
+        if (wait) {
+            engine.start(wait = true)
+            return
+        }
+
+        engine.start(wait = false)
+        try {
+            // CIO may launch connector binding asynchronously. Do not let a foreground service
+            // publish RUNTIME_STARTED until the requested socket has actually resolved; otherwise
+            // a port collision can leave a healthy-looking notification with no console server.
+            val connectors = runBlocking {
+                withTimeout(config.startupTimeoutMillis) {
+                    engine.resolvedConnectors()
+                }
+            }
+            val connector = connectors.singleOrNull()
+                ?: throw IllegalStateException("console server requires exactly one connector")
+            awaitReadiness(connector.host, connector.port)
+        } catch (failure: Throwable) {
+            runCatching { engine.stop(gracePeriodMillis = 0L, timeoutMillis = 500L) }
+            throw IllegalStateException("console connector failed to start", failure)
+        }
     }
 
     override fun close() {
-        engine.stop(gracePeriodMillis = 500L, timeoutMillis = 2_000L)
+        closeWithin(DEFAULT_CLOSE_TIMEOUT_MILLIS)
+    }
+
+    /** Stops connector acceptance within the caller-owned shutdown budget. */
+    fun closeWithin(timeoutMillis: Long) {
+        require(timeoutMillis > 0L) { "console close timeout must be positive" }
+        engine.stop(gracePeriodMillis = 0L, timeoutMillis = timeoutMillis)
+    }
+
+    private fun awaitReadiness(host: String, port: Int) {
+        val deadlineNanos = System.nanoTime() + config.startupTimeoutMillis * 1_000_000L
+        val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
+        val readinessUrl = URL("http://$urlHost:$port${ConsoleRoutes.READINESS}")
+        var lastFailure: Throwable? = null
+        while (System.nanoTime() < deadlineNanos) {
+            val remainingMillis =
+                ((deadlineNanos - System.nanoTime()).coerceAtLeast(0L) / 1_000_000L)
+            val attemptTimeout = remainingMillis.coerceIn(1L, STARTUP_PROBE_ATTEMPT_MILLIS).toInt()
+            try {
+                val connection =
+                    (readinessUrl.openConnection(Proxy.NO_PROXY) as HttpURLConnection).apply {
+                        connectTimeout = attemptTimeout
+                        readTimeout = attemptTimeout
+                        useCaches = false
+                    }
+                try {
+                    if (
+                        connection.responseCode == HttpStatusCode.OK.value &&
+                        connection.inputStream.bufferedReader().use { it.readText() } ==
+                            config.startupProbeToken
+                    ) {
+                        return
+                    }
+                } finally {
+                    connection.disconnect()
+                }
+            } catch (failure: Throwable) {
+                lastFailure = failure
+            }
+            Thread.sleep(STARTUP_PROBE_RETRY_MILLIS)
+        }
+        throw IllegalStateException("console readiness probe timed out", lastFailure)
+    }
+
+    private companion object {
+        const val STARTUP_PROBE_ATTEMPT_MILLIS = 250L
+        const val STARTUP_PROBE_RETRY_MILLIS = 25L
+        const val DEFAULT_CLOSE_TIMEOUT_MILLIS = 2_000L
     }
 }
 
@@ -159,6 +248,14 @@ fun Application.installConsoleApplication(
             call.respondText(
                 text = "{\"status\":\"ok\"}",
                 contentType = ContentType.Application.Json,
+                status = HttpStatusCode.OK,
+            )
+        }
+
+        get(ConsoleRoutes.READINESS) {
+            call.respondText(
+                text = config.startupProbeToken,
+                contentType = ContentType.Text.Plain,
                 status = HttpStatusCode.OK,
             )
         }

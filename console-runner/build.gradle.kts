@@ -8,9 +8,7 @@ kotlin {
 }
 
 dependencies {
-    implementation(project(":console-protocol"))
-    implementation(project(":console-server"))
-    implementation("com.durendal.droneagent:adapter-mock:local")
+    implementation(project(":console-adapter-mock"))
 
     testImplementation(project(":capability-matrix"))
     testImplementation(libs.ktor.server.test.host)

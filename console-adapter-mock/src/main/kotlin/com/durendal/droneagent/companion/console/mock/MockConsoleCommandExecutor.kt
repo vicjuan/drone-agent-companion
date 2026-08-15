@@ -1,4 +1,4 @@
-package com.durendal.droneagent.companion.console.runner
+package com.durendal.droneagent.companion.console.mock
 
 import com.durendal.droneagent.actuation.ActuationCommandFrame
 import com.durendal.droneagent.actuation.ActuationOperationResult
@@ -17,7 +17,7 @@ import com.durendal.droneagent.companion.console.server.ConsoleMonotonicClock
 import com.durendal.droneagent.companion.console.server.ConsoleSafetyTrigger
 
 /**
- * Mac-only execution adapter. Takeoff, landing and continuous control delegate to adapter-mock;
+ * Mock-only execution adapter. Takeoff, landing and continuous control delegate to adapter-mock;
  * RTH delegates to the explicitly injected companion simulation port. The same RTH instance must
  * also be injected into the snapshot provider so the simulated transition remains observable.
  * None of these successes upgrade the G520 capability evidence matrix.

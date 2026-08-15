@@ -212,17 +212,38 @@ commissioning 例外變成所有介面的 production 預設。
 
 到這裡才需要 Android。`RECEIVE_BOOT_COMPLETED` receiver 啟動 foreground
 service，service 承載 agent 生命週期與 S3 的 console server；不依賴任何
-Activity 存活；程序層 watchdog 與重啟事件寫 evidence log。
+Activity 存活；一般 process death 由 Android `START_STICKY` service recreation 恢復，
+重啟事件寫 evidence log。這不是 app 內另一個會與 agent 同時死亡的假 watchdog。
 
-用 mock flavor 在 emulator 驗證。`drone-agent-android` 已有
-`scripts/run-emulator-ci.command` 與 emulator 執行流程可參考。
+用 mock flavor 在 emulator 驗證。本 repo 已把 Mac runner 的 mock execution／snapshot
+抽成 `console-adapter-mock`，底層沿用 vendor `adapter-mock`；Android common source 不得依賴
+mock。詳細 frozen
+candidate、instrumentation、boot 與 force-stop 步驟見
+[`headless-emulator-runbook.md`](headless-emulator-runbook.md)。
+
+Android 平台不允許一般 app 在 `am force-stop` 後自行解除 stopped state；因此驗收拆成：
+
+- 一般 `:agent` process death：`START_STICKY` 重建、新 PID、console 恢復與 durable restart
+  evidence；
+- `force-stop`：預期持續停止、無 PID、無 health，直到外部明確 commissioning start；
+- app-owned safe stop：先 neutral／close／fsync，再停止 foreground service。
 
 **注意**：emulator 通過**不代表** G520 通過。開機自啟行為、廠商省電策略、
 foreground service 是否被回收，都必須在真板上重驗。這一列在 matrix 裡維持
 `UNKNOWN`。
 
-**完成判準**：emulator 冷開機後無人工介入，service 達到 running 並開始寫 log；
-kill 後自動恢復且留下重啟紀錄。
+**完成判準**：第一次明確啟用後，API 34 emulator 重開機不需 Activity，service 達到
+foreground/running；內嵌 SPA、`/healthz`、WS hello/runtime/telemetry 與 mock command
+admission 可用；一般 process death 後恢復並留下新 PID／restart evidence；safe stop 完成
+flush；force-stop 負向測試維持停止。所有結果最高只到 emulator `RUNTIME_VERIFIED`，matrix
+仍全為 `UNKNOWN`。
+
+**2026-08-15 實作狀態**：已建立 minSdk 26／targetSdk 34 的 Activity-free mock flavor、
+non-exported boot receiver 與 `connectedDevice` foreground service；service 在 `:agent` process
+承載 S3 server + mock agent，SPA 由固定 allowlist/SHA assets 原子安裝，lifecycle/restart
+evidence 以 app-private、bounded、fsync journal 保存。targeted JVM tests、Android production
+compile 與 instrumentation compile 已建立；frozen APK、emulator runtime、boot/restart 與
+force-stop lane 尚未執行，不得宣稱 Android runtime 已完成。
 
 ### S9　影像鏈路的無硬體部分（issue #7 的一半）
 

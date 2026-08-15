@@ -2,6 +2,9 @@ package com.durendal.droneagent.companion.console.runner
 
 import com.durendal.droneagent.actuation.FlightControlPortSnapshotListener
 import com.durendal.droneagent.adapter.mock.MockDroneAgent
+import com.durendal.droneagent.companion.console.mock.MockConsoleCommandExecutor
+import com.durendal.droneagent.companion.console.mock.MockConsoleSnapshotProvider
+import com.durendal.droneagent.companion.console.mock.ObservableMockReturnToHomePort
 import com.durendal.droneagent.companion.console.server.ConsoleCommandAdmission
 import com.durendal.droneagent.companion.console.server.ConsoleEpochClock
 import com.durendal.droneagent.companion.console.server.ConsoleMonotonicClock

@@ -1,4 +1,4 @@
-package com.durendal.droneagent.companion.console.runner
+package com.durendal.droneagent.companion.console.mock
 
 import com.durendal.droneagent.actuation.FlightControlCommandEvidence
 import com.durendal.droneagent.adapter.mock.MockDroneAgent

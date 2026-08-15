@@ -1,4 +1,4 @@
-package com.durendal.droneagent.companion.console.runner
+package com.durendal.droneagent.companion.console.mock
 
 import com.durendal.droneagent.companion.console.protocol.FlightState
 import com.durendal.droneagent.companion.console.server.AdmittedDiscreteCommand
