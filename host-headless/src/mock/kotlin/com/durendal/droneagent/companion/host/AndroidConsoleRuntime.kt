@@ -1,5 +1,6 @@
 package com.durendal.droneagent.companion.host
 
+import android.util.Log
 import com.durendal.droneagent.actuation.FlightControlPortSnapshotListener
 import com.durendal.droneagent.adapter.mock.MockDroneAgent
 import com.durendal.droneagent.companion.console.mock.MockConsoleCommandExecutor
@@ -94,7 +95,7 @@ class AndroidConsoleRuntime(
 
         val created =
             try {
-                createComponents()
+                runStartupPhase(StartupPhase.COMPONENTS, ::createComponents)
             } catch (failure: Throwable) {
                 synchronized(lifecycleLock) {
                     state = State.CLOSED
@@ -104,25 +105,37 @@ class AndroidConsoleRuntime(
             }
         startingComponents = created
         try {
-            ensureStartupAdmitted(created)
-            created.installListeners()
-            ensureStartupAdmitted(created)
-            created.agent.connection.connect()
-            ensureStartupAdmitted(created)
-            created.publishRuntimeState()
-            ensureStartupAdmitted(created)
-            created.server.start(wait = false)
-            ensureStartupAdmitted(created)
+            runStartupPhase(StartupPhase.LISTENERS) {
+                ensureStartupAdmitted(created)
+                created.installListeners()
+            }
+            runStartupPhase(StartupPhase.AGENT_CONNECT) {
+                ensureStartupAdmitted(created)
+                created.agent.connection.connect()
+            }
+            runStartupPhase(StartupPhase.LOCKED_RUNTIME_STATE) {
+                ensureStartupAdmitted(created)
+                created.publishRuntimeState()
+            }
+            runStartupPhase(StartupPhase.CONNECTOR) {
+                ensureStartupAdmitted(created)
+                created.server.start(wait = false)
+            }
             // Keep periodic telemetry stopped while the one-time canonical matrix parse warms.
             // A browser may already load the SPA/health endpoint, but HANDSHAKING cannot overflow
             // its bounded broadcast queue before this cold path finishes.
-            created.prewarmCapabilitySnapshot()
-            ensureStartupAdmitted(created)
-            synchronized(lifecycleLock) {
-                check(!stopRequested.get()) { "headless runtime startup was cancelled" }
-                components = created
-                startingComponents = null
-                state = State.ADMISSION_PENDING
+            runStartupPhase(StartupPhase.CAPABILITY_PREWARM) {
+                ensureStartupAdmitted(created)
+                created.prewarmCapabilitySnapshot()
+            }
+            runStartupPhase(StartupPhase.ADMISSION_PENDING) {
+                ensureStartupAdmitted(created)
+                synchronized(lifecycleLock) {
+                    check(!stopRequested.get()) { "headless runtime startup was cancelled" }
+                    components = created
+                    startingComponents = null
+                    state = State.ADMISSION_PENDING
+                }
             }
         } catch (failure: Throwable) {
             val cleanupResult = created.closeWithin(CLOSE_AFTER_START_FAILURE_MILLIS)
@@ -167,6 +180,7 @@ class AndroidConsoleRuntime(
                 state = State.RUNNING
             }
         } catch (failure: Throwable) {
+            reportStartupFailure(StartupPhase.ACTUATION_ADMISSION)
             startupReady.set(false)
             admitting.closeActuationAdmission()
             synchronized(lifecycleLock) {
@@ -233,9 +247,14 @@ class AndroidConsoleRuntime(
             try {
                 FileConsoleAuditSink(config.auditFile.toPath())
             } catch (failure: Throwable) {
-                runCatching { executor.close() }
-                runCatching { scheduler.close() }
-                runCatching { agent.shutdown() }
+                var cleanupFailed = false
+                runCatching { executor.close() }.onFailure { cleanupFailed = true }
+                runCatching { scheduler.close() }.onFailure { cleanupFailed = true }
+                runCatching { agent.shutdown() }.onFailure { cleanupFailed = true }
+                synchronized(lifecycleLock) {
+                    terminalCloseResult =
+                        if (cleanupFailed) RuntimeCloseResult.FAILED else RuntimeCloseResult.CLOSED
+                }
                 throw failure
             }
         val coreReference = AtomicReference<ConsoleServerCore>()
@@ -346,6 +365,34 @@ class AndroidConsoleRuntime(
         }
     }
 
+    private fun reportStartupFailure(phase: StartupPhase) {
+        // Bounded enum only: never emit exception text, paths, credentials, or identifiers.
+        val outcome = if (stopRequested.get()) "runtime_start_cancelled" else "runtime_start_failed"
+        runCatching { Log.e(LOG_TAG, "$outcome phase=${phase.wireName}") }
+    }
+
+    private inline fun <T> runStartupPhase(
+        phase: StartupPhase,
+        block: () -> T,
+    ): T =
+        try {
+            block()
+        } catch (failure: Throwable) {
+            reportStartupFailure(phase)
+            throw failure
+        }
+
+    private enum class StartupPhase(val wireName: String) {
+        COMPONENTS("components"),
+        LISTENERS("listeners"),
+        AGENT_CONNECT("agent_connect"),
+        LOCKED_RUNTIME_STATE("locked_runtime_state"),
+        CONNECTOR("connector"),
+        CAPABILITY_PREWARM("capability_prewarm"),
+        ADMISSION_PENDING("admission_pending"),
+        ACTUATION_ADMISSION("actuation_admission"),
+    }
+
     private enum class State {
         NEW,
         STARTING,
@@ -426,6 +473,7 @@ class AndroidConsoleRuntime(
         const val STREAM_ID = "mock-android-main"
         const val SERVER_VERSION = "0.2.0-headless-mock"
         const val CLOSE_AFTER_START_FAILURE_MILLIS = 2_000L
+        const val LOG_TAG = "DroneCompanionHost"
     }
 }
 

@@ -7,6 +7,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFilePermission
 
 /**
@@ -178,12 +179,16 @@ class FileConsoleAuditSink(
     }
 
     private fun setOwnerOnlyPermissionsWhenSupported(path: Path) {
-        if (Files.getFileStore(path).supportsFileAttributeView("posix")) {
-            Files.setPosixFilePermissions(
-                path,
-                setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
-            )
-        }
+        // Android's default java.nio provider deliberately throws SecurityException from
+        // Files.getFileStore(Path), even for app-private storage. Query the attribute view on the
+        // file itself instead; providers without POSIX permissions return null.
+        Files.getFileAttributeView(
+            path,
+            PosixFileAttributeView::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        )?.setPermissions(
+            setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+        )
     }
 
     private companion object {

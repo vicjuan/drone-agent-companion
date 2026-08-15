@@ -112,6 +112,28 @@ class AndroidConsoleRuntimeTest {
         }
     }
 
+    @Test
+    fun `audit construction failure reports closed after partial resources are released`() {
+        val webRoot = temporaryFolder.newFolder("audit-failure-web")
+        File(webRoot, "index.html").writeText("<html>headless</html>")
+        val invalidParent = temporaryFolder.newFile("audit-parent-is-a-file")
+        val runtime =
+            AndroidConsoleRuntime(
+                AndroidConsoleRuntimeConfig(
+                    webRoot = webRoot,
+                    auditFile = File(invalidParent, "console-events.jsonl"),
+                    bindPort = availablePort(),
+                ),
+            )
+
+        assertTrue(runCatching(runtime::start).isFailure)
+        assertEquals(
+            "pre-server resources were already released by the construction failure path",
+            RuntimeCloseResult.CLOSED,
+            runtime.closeWithin(2_000L),
+        )
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun `mock composition rejects an origin other than the fixed adb-forward endpoint`() {
         AndroidConsoleRuntimeConfig(

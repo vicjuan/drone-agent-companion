@@ -1,7 +1,11 @@
 package com.durendal.droneagent.companion.console.server
 
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.attribute.PosixFileAttributeView
+import java.nio.file.attribute.PosixFilePermission
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -60,6 +64,37 @@ class FileConsoleAuditSinkTest {
         assertThrows(IllegalArgumentException::class.java) {
             FileConsoleAuditSink(link)
         }
+    }
+
+    @Test
+    fun `audit permission setup never probes the Android unsupported file store API`() {
+        val resource = FileConsoleAuditSink::class.java.name.replace('.', '/') + ".class"
+        val implementationBytes =
+            checkNotNull(FileConsoleAuditSink::class.java.classLoader.getResourceAsStream(resource)) {
+                "Missing compiled implementation class $resource"
+            }.use { it.readBytes() }
+
+        assertFalse(
+            "Android's default provider always rejects Files.getFileStore(Path)",
+            implementationBytes.toString(Charsets.ISO_8859_1).contains("getFileStore"),
+        )
+    }
+
+    @Test
+    fun `audit file is owner only when the provider exposes a POSIX view`() {
+        val path = Files.createTempDirectory("console-audit-permissions").resolve("events.jsonl")
+        FileConsoleAuditSink(path).close()
+
+        val view =
+            Files.getFileAttributeView(
+                path,
+                PosixFileAttributeView::class.java,
+                LinkOption.NOFOLLOW_LINKS,
+            ) ?: return
+        assertEquals(
+            setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+            view.readAttributes().permissions(),
+        )
     }
 
     private fun event(
