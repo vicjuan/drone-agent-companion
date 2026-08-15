@@ -14,6 +14,7 @@ import com.durendal.droneagent.companion.console.server.FileConsoleAuditSink
 import com.durendal.droneagent.companion.console.server.JdkConsoleDeadlineScheduler
 import com.durendal.droneagent.companion.console.server.toActuationReadiness
 import com.durendal.droneagent.companion.console.server.transport.ConsoleCoreProtocolAdapter
+import com.durendal.droneagent.companion.console.server.transport.ConsoleMediaPlaybackConfig
 import com.durendal.droneagent.companion.console.server.transport.ConsoleServerConfig
 import com.durendal.droneagent.companion.console.server.transport.KtorConsoleServer
 import com.durendal.droneagent.companion.console.server.transport.ProtocolConsoleSocketController
@@ -29,7 +30,14 @@ object ConsoleRunnerProfile {
     const val BIND_PORT: Int = 8080
     const val AGENT_ID: String = "mock"
     const val STREAM_ID: String = "mock-main"
+    const val MEDIA_PLAYBACK_ORIGIN: String = "http://127.0.0.1:8891"
     const val SERVER_VERSION: String = "0.1.0"
+
+    fun mediaPlaybackConfig(): ConsoleMediaPlaybackConfig =
+        ConsoleMediaPlaybackConfig(
+            origin = MEDIA_PLAYBACK_ORIGIN,
+            streamId = STREAM_ID,
+        )
 }
 
 data class ConsoleRunnerConfig(
@@ -110,6 +118,7 @@ fun main(args: Array<String>) {
                 bindHost = ConsoleRunnerProfile.BIND_HOST,
                 bindPort = config.bindPort,
                 webRoot = config.webRoot,
+                mediaPlayback = ConsoleRunnerProfile.mediaPlaybackConfig(),
             ),
             controller,
         )
@@ -152,6 +161,10 @@ fun main(args: Array<String>) {
         println(
             "[console-runner] adapter=mock profile=localhost_development " +
                 "http://${ConsoleRunnerProfile.BIND_HOST}:${config.bindPort}",
+        )
+        println(
+            "[console-runner] media=synthetic_mac configured_only=true " +
+                ConsoleRunnerProfile.mediaPlaybackConfig().pageUrl,
         )
         println("[console-runner] audit=${config.auditPath}")
         server.start(wait = true)

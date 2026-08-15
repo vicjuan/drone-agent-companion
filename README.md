@@ -33,6 +33,8 @@ touch UI is replaced by an on-device web server operated from a browser.
   view of the canonical G520 evidence matrix.
 - [`docs/headless-emulator-runbook.md`](docs/headless-emulator-runbook.md): frozen API 34
   emulator build/runtime procedure and the force-stop safety boundary.
+- [`docs/mac-media-fixture-runbook.md`](docs/mac-media-fixture-runbook.md): pinned
+  MediaMTX/ffmpeg synthetic RTMP → WHEP fixture, loopback proof and Mac-only evidence ceiling.
 
 ## Workspace bootstrap
 
@@ -85,3 +87,23 @@ observable simulation because the upstream mock adapter has no RTH action port. 
 DJI evidence.
 
 All G520 hardware capabilities remain `UNKNOWN` until first-hand commissioning evidence exists.
+
+## Mac synthetic video fixture
+
+Issue #7's no-hardware half uses a digest-pinned MediaMTX 1.19.1 container and a stdlib Python
+clock source piped through ffmpeg. It publishes only `mock-main`; Docker exposes RTMP, WebRTC HTTP
+and ICE UDP on Mac `127.0.0.1` only.
+
+```bash
+./scripts/test-media-fixture-static.sh
+# Terminal A: keep the foreground owner running.
+./scripts/media-fixture.sh run
+# Terminal B:
+./scripts/media-fixture.sh verify
+# Perform the browser/WHEP checks in the runbook.
+# Return to Terminal A and press Ctrl-C for ownership-safe cleanup.
+```
+
+See [`docs/mac-media-fixture-runbook.md`](docs/mac-media-fixture-runbook.md) before starting it.
+Mac synthetic playback and latency evidence do not verify G520 or the aircraft camera and cannot
+close issue #7.

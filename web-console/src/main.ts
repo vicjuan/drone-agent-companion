@@ -18,6 +18,11 @@ import {
   type ConsoleViewState,
 } from "./console-state.js";
 import type { CommandRequestPayload } from "./console-protocol.js";
+import {
+  INITIAL_VIDEO_PLAYBACK_STATE,
+  loadVideoPlayback,
+  type VideoPlaybackState,
+} from "./video-playback.js";
 
 const root = document.querySelector<HTMLElement>("#app");
 if (root === null) throw new Error("Missing #app root");
@@ -44,6 +49,20 @@ root.innerHTML = `
 
     <main class="dashboard-grid">
       <div class="dashboard-column dashboard-column--telemetry">
+        <section class="panel video-panel" aria-labelledby="video-playback-heading">
+          <div class="panel-heading panel-heading--compact">
+            <div><p class="eyebrow">VISUAL LINK</p><h2 id="video-playback-heading">Synthetic playback</h2></div>
+            <span id="video-status" class="mini-pill video-status" data-tone="loading" aria-live="polite" aria-atomic="true">LOADING</span>
+          </div>
+          <div id="video-stage" class="video-stage" data-state="loading" aria-busy="true">
+            <div id="video-placeholder" class="video-placeholder" role="status" aria-live="polite" aria-atomic="true">
+              <strong id="video-state-title">載入影像設定</strong>
+              <span id="video-state-detail">正在向本機 server 取得唯讀播放設定。</span>
+            </div>
+          </div>
+          <p id="video-truth" class="video-truth">「CONFIGURED」只表示 server 提供通過驗證的 iframe 設定，不代表 MediaMTX 在線或影像已播放；播放真值請以 iframe 內實際畫面為準。Mac 合成訊源不構成 G520 或 aircraft camera 證據。</p>
+        </section>
+
         <section class="panel telemetry-panel">
           <div class="panel-heading">
             <div><p class="eyebrow">LIVE STATE</p><h2>Telemetry</h2></div>
@@ -157,6 +176,11 @@ const refs = {
   leaseDetail: requireElement<HTMLElement>("#lease-detail"),
   runtimeTruth: requireElement<HTMLElement>("#runtime-truth"),
   telemetrySequence: requireElement<HTMLElement>("#telemetry-sequence"),
+  videoStatus: requireElement<HTMLElement>("#video-status"),
+  videoStage: requireElement<HTMLElement>("#video-stage"),
+  videoPlaceholder: requireElement<HTMLElement>("#video-placeholder"),
+  videoStateTitle: requireElement<HTMLElement>("#video-state-title"),
+  videoStateDetail: requireElement<HTMLElement>("#video-state-detail"),
   battery: requireElement<HTMLElement>("#battery-value"),
   batteryProgress: requireElement<HTMLProgressElement>("#battery-progress"),
   flightState: requireElement<HTMLElement>("#flight-state"),
@@ -193,6 +217,7 @@ const vectors: Readonly<Record<string, ControlVector>> = CONTROL_VECTORS;
 const client = new CompanionConsoleClient({ url: consoleWebSocketUrl(), onState: render });
 const holdController = new ContinuousHoldController(client);
 const commandConfirmation = new DiscreteCommandConfirmation();
+let videoFrame: HTMLIFrameElement | null = null;
 
 refs.leaseAcquire.addEventListener("click", () => client.acquireLease());
 refs.leaseRenew.addEventListener("click", () => client.renewLease());
@@ -291,6 +316,8 @@ window.addEventListener("pageshow", (event) => {
   if (event.persisted) client.start();
 });
 
+renderVideoPlayback(INITIAL_VIDEO_PLAYBACK_STATE);
+void loadVideoPlayback().then(renderVideoPlayback);
 render(client.getState());
 client.start();
 
@@ -454,6 +481,56 @@ function renderCapabilities(state: ConsoleViewState): void {
       return row;
     }),
   );
+}
+
+function renderVideoPlayback(state: VideoPlaybackState): void {
+  videoFrame?.remove();
+  videoFrame = null;
+  refs.videoStage.dataset.state = state.phase;
+  refs.videoStage.setAttribute("aria-busy", state.phase === "loading" ? "true" : "false");
+  refs.videoPlaceholder.hidden = false;
+
+  switch (state.phase) {
+    case "loading":
+      refs.videoStatus.textContent = "LOADING";
+      refs.videoStatus.dataset.tone = "loading";
+      refs.videoStateTitle.textContent = "載入影像設定";
+      refs.videoStateDetail.textContent = "正在向本機 server 取得唯讀播放設定。";
+      return;
+    case "unavailable":
+      refs.videoStatus.textContent = "UNAVAILABLE";
+      refs.videoStatus.dataset.tone = "unavailable";
+      refs.videoStateTitle.textContent = "影像未啟用";
+      refs.videoStateDetail.textContent = "Server 未提供本機合成影像；飛控 readiness 不受影響。";
+      return;
+    case "error":
+      refs.videoStatus.textContent = "ERROR";
+      refs.videoStatus.dataset.tone = "error";
+      refs.videoStateTitle.textContent = "影像設定遭拒";
+      refs.videoStateDetail.textContent =
+        state.reason === "media_endpoint_unavailable"
+          ? "無法讀取本機影像設定；外部 frame 維持關閉。"
+          : "影像設定未通過安全驗證；外部 frame 維持關閉。";
+      return;
+    case "configured": {
+      refs.videoStatus.textContent = "CONFIGURED / SYNTHETIC";
+      refs.videoStatus.dataset.tone = "synthetic";
+      refs.videoPlaceholder.hidden = true;
+      const frame = document.createElement("iframe");
+      frame.className = "video-frame";
+      frame.title = "Mac 合成影像播放器（非 G520 或飛機證據）";
+      frame.setAttribute("aria-label", frame.title);
+      frame.setAttribute("aria-describedby", "video-truth");
+      frame.sandbox.add("allow-scripts", "allow-same-origin");
+      frame.allow = "autoplay";
+      frame.referrerPolicy = "no-referrer";
+      frame.loading = "eager";
+      frame.src = state.config.pageUrl;
+      videoFrame = frame;
+      refs.videoStage.append(frame);
+      return;
+    }
+  }
 }
 
 function consoleWebSocketUrl(): string {

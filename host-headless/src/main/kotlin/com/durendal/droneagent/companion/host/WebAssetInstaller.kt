@@ -268,14 +268,15 @@ class WebAssetInstaller private constructor(
             WebAssetBundle(
                 listOf(
                     packaged("index.html", "72d76342c89f6a74635bd80abf99f7b348d001a4c1dea0a4260d56b217bdcd33"),
-                    packaged("styles.css", "5d0d80ea22c78016a12b40cd620c201378b2c65c5bfd968517507c33faff1086"),
+                    packaged("styles.css", "95082b469216b040802be61475442fa8a7841f2f1dcbb043c93e4c367ed89bfc"),
                     packaged("assets/capability-matrix.js", "e97b8c6ba9ab022613999b7fba9e08a8dab92df1f12e484ce9740921cba52116"),
                     packaged("assets/console-actions.js", "54b702b39cc4336b125d8871543e77cee3a5a0201130b406a6aa458d81d0a0c9"),
                     packaged("assets/console-client.js", "29cef4c10209ac87cf09127579220978c09ef088d9e0b26022ce672c3b4e36ab"),
                     packaged("assets/console-protocol.js", "372c1e9ae4fd56180cb488b44acd7d4cf76e2719dad0d5a8ec89c0a3f718c247"),
                     packaged("assets/console-state.js", "e3170479ece749c304696505e8900745faf6dc9050e37334ee2cf0eea5dd7058"),
                     packaged("assets/continuous-hold.js", "1a9bdcbd618704acf541219a1d7c8aa42c44e2072b2b16f3cd55c9c01d633cd5"),
-                    packaged("assets/main.js", "1976e2afef4eb5966b5abd03c38b637332457740643c802533f162ad788e4e7a"),
+                    packaged("assets/main.js", "800ae6918b769d27b4657b0a06279cb340f4cb1135a3fcb1744624cb89a88839"),
+                    packaged("assets/video-playback.js", "67eda0d42cda80324e6bdc66086ed35bdca31ff13b7113c5aab70528aef872ca"),
                     packaged("capability-matrix/g520-stack.json", "edc30d4bc9a1e1f0db4823e0428e74b54c5d512a3e9d2a21dcacf27ff26de14a"),
                 ),
             )
