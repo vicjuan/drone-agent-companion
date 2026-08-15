@@ -1,0 +1,30 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-capability-001",
+  "type": "capability_snapshot",
+  "payload": {
+    "matrixId": "mini4pro-rcn3-g520-android",
+    "schemaVersion": 1,
+    "lastUpdated": "2026-08-15",
+    "sourceDigestSha256": "edc30d4bc9a1e1f0db4823e0428e74b54c5d512a3e9d2a21dcacf27ff26de14a",
+    "rows": [
+      {"id": "battery", "status": "UNKNOWN", "assessment": "No first-hand evidence from the target stack."},
+      {"id": "gps_position", "status": "UNKNOWN", "assessment": "No first-hand evidence from the target stack."},
+      {"id": "flight_state", "status": "UNKNOWN", "assessment": "No first-hand evidence from the target stack."},
+      {"id": "gimbal_camera_state", "status": "UNKNOWN", "assessment": "No first-hand evidence from the target stack."},
+      {"id": "stream_capability", "status": "UNKNOWN", "assessment": "No first-hand evidence from the target stack."},
+      {"id": "headless_boot_service", "status": "UNKNOWN", "assessment": "Emulator behavior is not G520 hardware evidence."},
+      {"id": "point_to_point_ethernet", "status": "UNKNOWN", "assessment": "The topology is selected but has not been verified on G520."},
+      {"id": "rcn3_usb_attach", "status": "UNKNOWN", "assessment": "No first-hand G520 USB-host or permission evidence."},
+      {"id": "msdk_registration_activation", "status": "UNKNOWN", "assessment": "No first-hand MSDK activation evidence from G520."},
+      {"id": "aircraft_connection", "status": "UNKNOWN", "assessment": "No first-hand aircraft connection evidence from G520."},
+      {"id": "rcn3_four_axis_input", "status": "UNKNOWN", "assessment": "No first-hand stick-axis evidence from the target stack."},
+      {"id": "takeoff_actuation", "status": "UNKNOWN", "assessment": "Mock takeoff is simulation and does not confirm hardware actuation."},
+      {"id": "landing_actuation", "status": "UNKNOWN", "assessment": "Mock landing is simulation and does not confirm hardware actuation."},
+      {"id": "rth_actuation", "status": "UNKNOWN", "assessment": "No target-stack execution path has been verified."},
+      {"id": "virtual_stick_actuation", "status": "UNKNOWN", "assessment": "Mock velocity commands do not confirm G520 or aircraft authority."},
+      {"id": "continuous_control_neutralization", "status": "UNKNOWN", "assessment": "Software tests cannot confirm the aircraft response on this stack."},
+      {"id": "opencv_on_device_recognition", "status": "UNKNOWN", "assessment": "Desktop and emulator runs are not G520 runtime evidence."}
+    ]
+  }
+}

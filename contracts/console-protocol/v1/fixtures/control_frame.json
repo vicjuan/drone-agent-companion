@@ -1,0 +1,14 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-control-frame-001",
+  "type": "control_frame",
+  "payload": {
+    "leaseId": "lease-primary-001",
+    "inputSequence": 7,
+    "ttlMs": 250,
+    "forward": 0.75,
+    "right": -0.25,
+    "up": 0.5,
+    "yaw": -0.5
+  }
+}

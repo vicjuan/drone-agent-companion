@@ -1,0 +1,10 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-protocol-error-004",
+  "type": "protocol_error",
+  "payload": {
+    "relatedMessageId": "fixture-client-hello-duplicate",
+    "code": "unexpected_message",
+    "detail": "Message is not valid in the current session state."
+  }
+}

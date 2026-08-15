@@ -1,0 +1,10 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-protocol-error-001",
+  "type": "protocol_error",
+  "payload": {
+    "relatedMessageId": "fixture-control-frame-invalid",
+    "code": "invalid_payload",
+    "detail": "Payload does not match the message schema."
+  }
+}

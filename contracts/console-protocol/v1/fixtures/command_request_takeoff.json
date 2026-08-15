@@ -1,0 +1,11 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-command-takeoff-001",
+  "type": "command_request",
+  "payload": {
+    "commandId": "command-takeoff-001",
+    "leaseId": "lease-primary-001",
+    "action": "takeoff",
+    "ttlMs": 5000
+  }
+}

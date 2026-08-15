@@ -1,0 +1,11 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-command-ack-001",
+  "type": "command_ack",
+  "payload": {
+    "commandId": "command-takeoff-001",
+    "decision": "accepted",
+    "reason": null,
+    "intentDigestSha256": "707a5ad01589dda74b7cf8240c10aec56ad1fffaf440ed02204276e2f4158487"
+  }
+}

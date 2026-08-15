@@ -1,0 +1,10 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-protocol-error-002",
+  "type": "protocol_error",
+  "payload": {
+    "relatedMessageId": "fixture-lease-acquire-001",
+    "code": "handshake_required",
+    "detail": "Client hello must complete before this message."
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-lease-denied-001",
+  "type": "lease_state",
+  "payload": {
+    "requestMessageId": "fixture-lease-acquire-002",
+    "state": "denied",
+    "leaseId": null,
+    "holderSessionId": null,
+    "expiresInMs": null,
+    "reason": "lease_already_held"
+  }
+}

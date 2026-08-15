@@ -1,0 +1,10 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-protocol-error-003",
+  "type": "protocol_error",
+  "payload": {
+    "relatedMessageId": "fixture-command-takeoff-001",
+    "code": "server_unavailable",
+    "detail": "Server could not safely process the message."
+  }
+}

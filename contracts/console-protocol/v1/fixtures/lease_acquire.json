@@ -1,0 +1,8 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-lease-acquire-001",
+  "type": "lease_acquire",
+  "payload": {
+    "requestedTtlMs": 5000
+  }
+}

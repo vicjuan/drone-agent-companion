@@ -1,0 +1,9 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-lease-renew-001",
+  "type": "lease_renew",
+  "payload": {
+    "leaseId": "lease-primary-001",
+    "requestedTtlMs": 5000
+  }
+}

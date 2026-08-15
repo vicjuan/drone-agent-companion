@@ -1,0 +1,13 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-lease-held-001",
+  "type": "lease_state",
+  "payload": {
+    "requestMessageId": "fixture-lease-acquire-001",
+    "state": "held",
+    "leaseId": "lease-primary-001",
+    "holderSessionId": "session-localhost-001",
+    "expiresInMs": 5000,
+    "reason": null
+  }
+}

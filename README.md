@@ -48,3 +48,28 @@ npm test --prefix web-console
 Without a shared Android SDK, Gradle intentionally includes only the JDK modules. To configure
 `host-headless` and `vision-opencv-android`, expose the same SDK to this build and the included
 vendor build through `ANDROID_HOME` or `ANDROID_SDK_ROOT`.
+
+> The companion repository is public, but the read-only `drone-agent-android` submodule may still
+> require GitHub access. A public clone or GitHub Actions token cannot fetch a private submodule
+> unless a maintainer supplies a read-only deploy key or equivalent credential.
+
+## Weekend Web Control MVP
+
+Run the Mac/JVM mock vertical slice with JDK 17:
+
+```bash
+export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home
+./gradlew :console-runner:run
+```
+
+Then open <http://127.0.0.1:8080>. The Gradle task installs and builds the SPA before starting the
+server. The runner binds only to loopback and records audit events in
+`.drone-agent-companion/audit/console-events.jsonl`.
+
+The browser shows the actual runtime adapter, connection and actuation-lock state. Takeoff,
+landing and RTH require confirmation; the six continuous directions use press-and-hold controls
+with server-side lease, TTL, dead-man and neutral enforcement. Mock RTH is a companion-owned,
+observable simulation because the upstream mock adapter has no RTH action port. It is not G520 or
+DJI evidence.
+
+All G520 hardware capabilities remain `UNKNOWN` until first-hand commissioning evidence exists.

@@ -1,0 +1,11 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-command-result-002",
+  "type": "command_result",
+  "payload": {
+    "commandId": "command-rth-001",
+    "status": "failed",
+    "reason": "adapter_rejected",
+    "detail": "Mock failure fixture."
+  }
+}

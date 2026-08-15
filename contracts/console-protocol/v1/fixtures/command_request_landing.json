@@ -1,0 +1,11 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-command-landing-001",
+  "type": "command_request",
+  "payload": {
+    "commandId": "command-landing-001",
+    "leaseId": "lease-primary-001",
+    "action": "landing",
+    "ttlMs": 5000
+  }
+}

@@ -57,6 +57,27 @@ JSON、投影上游五個 `core` capability，並產生 Markdown。`console-serv
 immutable snapshot；`web-console` build 複製同一 JSON。即時 adapter／connection／
 actuation lock／lease 狀態是另一份 runtime 資料，不得覆寫 evidence status。
 
+## Weekend console 實作切片
+
+瀏覽器 console 使用本 repo 自有的 versioned wire contract，與凍結的
+`contracts/agent-protocol/` 完全分離。v1 固定 18 種 message type（client 7、server 11），
+Kotlin 與 TypeScript 共讀 canonical fixtures 與 digest；decoder 對方向、欄位、數值語意、
+64 KiB frame 上限與 JSON nesting 深度均 fail-closed。瀏覽器 payload 無法提供或
+覆寫 authority decision、adapter、aircraft connection、actuation lock 或 operating profile。
+
+JVM runner 已選用 Ktor CIO，並實作靜態 SPA 與 `/api/console/v1` WebSocket。
+目前這個選型只在 Mac/JVM 驗證；Android engine compatibility 與 APK 體積屬 #2，
+未經 emulator/G520 驗證前不宣稱 Android 可用。localhost profile 另有以下邊界：
+
+- server 固定允許的 browser `Origin`，不從請求 `Host` 推導；missing、`null`、
+  錯 host/port 或重複 `Origin` 在建立 session 前即拒絕；
+- 靜態回應以 CSP `frame-ancestors 'none'` 與 `X-Frame-Options: DENY` 阻擋
+  clickjacking，並拒絕 web root 與任一 ancestor symlink escape；
+- handshake 採 `WAITING → HANDSHAKING → READY`，保證 `server_hello` 為第一筆且
+  handshake 期間狀態變更不會讓新 client 永久 stale；
+- 單一 operator lease 是全域事實；`HELD`、`RELEASED`、`EXPIRED` 廣播給
+  READY clients，`DENIED` 只是 requester receipt，不會覆寫 UI 的全域 lease truth。
+
 ## OpenCV on-device 視覺決策
 
 `drone-agent-android:vision` 已有 `TapeSegmenter` 等 OpenCV 程式碼，但 OpenCV desktop
@@ -98,10 +119,16 @@ closed-loop-not-executed guard）隨 submodule 一併生效，CI 必須執行。
 2. **Mock 可執行不等於真機可執行。** Weekend MVP 允許 takeoff、landing、RTH 與
    virtual-stick 命令在 `adapter-mock` 下端到端執行。真機啟動時預設鎖住致動，
    只能由明確的 hardware commissioning session 逐項開放並產生第一手證據；一般
-   operational profile 不得把 `UNKNOWN` 當作已確認能力。
+   operational profile 不得把 `UNKNOWN` 當作已確認能力。目前 mock RTH 是
+   companion-owned、可觀察的 simulation port，會讓 mock telemetry 顯示
+   `RETURNING_HOME`；上游 `adapter-mock` 並沒有 RTH action port，因此這不是
+   DJI/G520 RTH 證據。
 3. **連續控制 fail-closed。** virtual-stick 採單一 operator control lease、命令
    sequence/TTL 與 server-side dead-man timeout；瀏覽器放開控制、失焦、斷線或
    lease 失效時，server 必須主動送出 neutral，不能保留最後一次輸入。
+   takeoff、landing 與 RTH 在離散動作前也必須先建立 neutral barrier；致動
+   timeout、readiness loss、release、disconnect 與 server stop 均必須以新的
+   neutral invocation 處理，不能重用已完成或已失敗的 barrier。
 4. **Weekend MVP 不建立帳號系統。** Mac runner 只綁 `127.0.0.1`；G520 初次
    commissioning 只綁點對點 Ethernet 介面。Windows 與 G520 使用固定 IP，且 Windows
    不得開啟 Internet Connection Sharing 或 network bridge。進入共享、無線或可路由
@@ -110,6 +137,13 @@ closed-loop-not-executed guard）隨 submodule 一併生效，CI 必須執行。
    adapter（Mock／DJI）、aircraft connection 與 actuation lock 狀態。
 6. **Evidence logging 不可關閉。** 命令、authority 決策、control lease、neutral
    safety action 與 commissioning 狀態轉換一律落地可回收的審計紀錄。
+   admitted/completed 紀錄含 server-owned `authorityDecisionId`、full-intent digest 與
+   result；client-triggered neutral 另保留 release/cancel/blur/page-hide reason。必要稽核
+   寫入失敗時必須鎖住致動、撤銷 lease 並 neutral，不得繼續回報成功。
+7. **Runtime readiness 為 server-owned gate。** command/control 在 admission 前、commit 時與
+   executor 前均重驗 adapter、aircraft connection、actuation lock、operating profile 與
+   monotonic readiness epoch。Mock 只在 localhost + connected + unlocked 放行；DJI 只有
+   受控 hardware commissioning allowlist 可放行，一般 operational profile 預設拒絕。
 
 ## 已決定的網路拓樸
 
@@ -125,4 +159,4 @@ G520 Android 上驗證固定 IP、指定介面 bind、開機可達性與 WebSock
 4. **OpenCV 實作選型**：Android distribution／native packaging 方式與第一個可驗收的
    visual-recognition target（#14）；使用 OpenCV 本身已定案。
 
-最後更新：2026-08-14。
+最後更新：2026-08-15。

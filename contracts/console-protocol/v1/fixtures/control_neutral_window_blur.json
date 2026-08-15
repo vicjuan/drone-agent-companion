@@ -1,0 +1,10 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-control-neutral-001",
+  "type": "control_neutral",
+  "payload": {
+    "leaseId": "lease-primary-001",
+    "inputSequence": 8,
+    "reason": "window_blur"
+  }
+}

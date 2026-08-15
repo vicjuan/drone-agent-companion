@@ -115,14 +115,20 @@ credential 與 TLS，不得為此更動凍結的 Phase-0 agent protocol。
 
 **完成判準**：codec round-trip 單元測試通過；fixtures 被兩端測試共用。
 
+**2026-08-15 實作狀態**：v1 固定 18 種 message type（client 7、server 11），
+Kotlin 與 TypeScript 共讀 30 份 canonical fixtures、manifest 與 SHA-256。codec 採方向性
+decode/encode、exact-key validation、RFC 8259 數值語意、64 KiB frame 與 16 層 nesting
+上限；client payload 不含 authority assertion。這些是 console 內部契約，未更動上游
+凍結 agent protocol。
+
 ### S3　實作 console server（issue #3 的後半）
 
 WebSocket + 靜態資源服務，pure JVM。
 
-**待決技術選型**：Android 上沒有 `com.sun.net.httpserver`，OkHttp 也只有
-client。候選是 Ktor（CIO engine，含 WebSocket 與 static content，可在 Android
-執行）或 NanoHTTPD。建議 Ktor，但**必須實測其 Android 相容性與 APK 體積後
-才算數**，選定理由寫進 PR。
+**目前選型**：JVM runner 使用 Ktor CIO（WebSocket + static content）。Android 上
+沒有 `com.sun.net.httpserver`，OkHttp 也只有 client；Ktor 目前只在 Mac/JVM 候選
+版驗證。必須在 #2 實測 Android engine 相容性與 APK 體積後，才能把這個
+選型延伸到 `host-headless`。
 
 接線：訂閱 `core` 的 `TelemetrySource`、讀 S1 的 matrix、命令一律送進
 `CommandAdmissionPolicy` 與既有 actuation arbitration。不得存在任何繞過 admission
@@ -131,6 +137,13 @@ dead-man neutral。
 
 **完成判準**：單元測試涵蓋連線生命週期、多 client 爭用 control lease、refused
 dispatch 必有回覆，以及輸入停止／瀏覽器斷線／lease 失效時強制 neutral。
+
+**2026-08-15 實作狀態**：已建立 transport-independent `ConsoleServerCore`、Ktor
+transport、single-operator lease、discrete/control admission、dead-man/watchdog、neutral
+barrier 與 JSONL audit。server-owned readiness gate 在 admission、commit 與 executor 前都重驗
+adapter/connection/lock/profile；狀態失效會撤銷 lease 並 neutral。Origin gate、
+clickjacking headers、static symlink boundary、handshake ordering 與 global lease truth 均有測試。
+Ktor Android 仍未驗證。
 
 ### S4　console-runner：讓整套系統在 Mac 上跑起來
 
@@ -142,6 +155,11 @@ dispatch 必有回覆，以及輸入停止／瀏覽器斷線／lease 失效時�
 
 **完成判準**：`./gradlew :console-runner:run` 只綁 `127.0.0.1`；瀏覽器可建立
 WebSocket 連線、收到 mock telemetry，且 mock adapter 能回傳命令 ack／result。
+
+**2026-08-15 實作狀態**：Mac composition root 已接上 `adapter-mock`、runtime readiness、
+telemetry、audit 與 Ktor，固定 `127.0.0.1:8080`。上游 mock 沒有 RTH action port，
+因此 runner 以 companion-owned observable simulation seam 顯示 `RETURNING_HOME`；此路徑
+只是 demo 可觀察性，不是 DJI/G520 RTH 證據。
 
 ### S5　web console SPA v1：可見、可控制的 MVP（issues #4、#10）
 
@@ -161,6 +179,12 @@ resources 內嵌，單一產物即可服務。
 **Weekend MVP 完成判準**：mock 下瀏覽器可看到即時更新；上述命令全部經完整
 admission → authority → audit → adapter 路徑執行並收到結果；第二個 browser client
 不能取得同一 control lease；斷線有明確 UI 狀態並自動重連；server 可觀察到 neutral。
+
+**2026-08-15 實作狀態**：SPA 已顯示 runtime/health/telemetry/capability/lease，
+並提供需確認的 takeoff/landing/RTH 與六向 press-and-hold。release、cancel、
+pointer-capture 失敗、鍵盤焦點轉移、window blur、visibility/pagehide 都匯入
+同一個 idempotent neutral 路徑；protocol error 會鎖住當前 session 並重連。UI 狀態
+保留 `UNKNOWN` capability，也不會把 targeted lease denial 誤當全域 lease truth。
 
 ### S6　點對點 Ethernet commissioning profile（issue #6）
 

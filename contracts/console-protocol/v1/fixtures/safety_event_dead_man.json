@@ -1,0 +1,13 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-safety-event-001",
+  "type": "safety_event",
+  "payload": {
+    "action": "neutralize",
+    "outcome": "succeeded",
+    "trigger": "control_ttl_expired",
+    "leaseId": "lease-primary-001",
+    "lastInputSequence": 7,
+    "detail": "Server dead-man neutralized the control output."
+  }
+}

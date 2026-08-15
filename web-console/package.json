@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --project tsconfig.json && node scripts/copy-static.mjs",
+    "build": "node scripts/clean-dist.mjs && tsc --project tsconfig.json && node scripts/copy-static.mjs",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "test": "npm run build && node --test test/*.test.mjs"
   },

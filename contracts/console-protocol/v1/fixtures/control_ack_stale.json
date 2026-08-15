@@ -1,0 +1,11 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-control-ack-002",
+  "type": "control_ack",
+  "payload": {
+    "leaseId": "lease-primary-001",
+    "inputSequence": 6,
+    "status": "stale",
+    "reason": "non_increasing_sequence"
+  }
+}

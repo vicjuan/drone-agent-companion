@@ -1,0 +1,11 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-command-ack-002",
+  "type": "command_ack",
+  "payload": {
+    "commandId": "command-rth-001",
+    "decision": "rejected",
+    "reason": "actuation_locked",
+    "intentDigestSha256": "62c5bf39b29235c323847b4591d70e42cc5007328b86a2f66cc9c7c90bdb8dc9"
+  }
+}

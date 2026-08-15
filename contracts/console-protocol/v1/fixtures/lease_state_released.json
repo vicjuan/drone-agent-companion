@@ -1,0 +1,13 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-lease-released-001",
+  "type": "lease_state",
+  "payload": {
+    "requestMessageId": "fixture-lease-release-001",
+    "state": "released",
+    "leaseId": "lease-primary-001",
+    "holderSessionId": null,
+    "expiresInMs": null,
+    "reason": null
+  }
+}

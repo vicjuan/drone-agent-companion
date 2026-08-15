@@ -1,0 +1,13 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-safety-event-002",
+  "type": "safety_event",
+  "payload": {
+    "action": "neutralize",
+    "outcome": "failed",
+    "trigger": "client_disconnect",
+    "leaseId": "lease-primary-001",
+    "lastInputSequence": 7,
+    "detail": "Neutral executor rejected the safety action."
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-command-result-001",
+  "type": "command_result",
+  "payload": {
+    "commandId": "command-takeoff-001",
+    "status": "succeeded",
+    "reason": null,
+    "detail": null
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-runtime-state-001",
+  "type": "runtime_state",
+  "payload": {
+    "adapter": "mock",
+    "aircraftConnection": "connected",
+    "actuationLock": "unlocked",
+    "operatingProfile": "localhost_development"
+  }
+}

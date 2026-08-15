@@ -1,0 +1,15 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-telemetry-001",
+  "type": "telemetry",
+  "payload": {
+    "sequence": 42,
+    "batteryPercent": 87,
+    "latitude": null,
+    "longitude": null,
+    "altitudeM": 12.5,
+    "flightState": "flying",
+    "gimbalPitchDeg": -23.5,
+    "cameraRecording": null
+  }
+}

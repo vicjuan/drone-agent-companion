@@ -1,0 +1,11 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-command-rth-001",
+  "type": "command_request",
+  "payload": {
+    "commandId": "command-rth-001",
+    "leaseId": "lease-primary-001",
+    "action": "return_to_home",
+    "ttlMs": 5000
+  }
+}

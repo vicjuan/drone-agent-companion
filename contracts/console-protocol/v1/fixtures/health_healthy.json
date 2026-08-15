@@ -1,0 +1,10 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-health-001",
+  "type": "health",
+  "payload": {
+    "status": "healthy",
+    "uptimeMs": 120000,
+    "detail": null
+  }
+}
