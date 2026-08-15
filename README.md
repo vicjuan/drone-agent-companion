@@ -35,6 +35,8 @@ touch UI is replaced by an on-device web server operated from a browser.
   emulator build/runtime procedure and the force-stop safety boundary.
 - [`docs/mac-media-fixture-runbook.md`](docs/mac-media-fixture-runbook.md): pinned
   MediaMTX/ffmpeg synthetic RTMP → WHEP fixture, loopback proof and Mac-only evidence ceiling.
+- [`docs/evidence/video-path-mac-runtime.md`](docs/evidence/video-path-mac-runtime.md): frozen
+  Mac synthetic runtime result, conservative latency samples and explicit hardware limitations.
 
 ## Workspace bootstrap
 
@@ -104,6 +106,8 @@ and ICE UDP on Mac `127.0.0.1` only.
 # Return to Terminal A and press Ctrl-C for ownership-safe cleanup.
 ```
 
-See [`docs/mac-media-fixture-runbook.md`](docs/mac-media-fixture-runbook.md) before starting it.
+See [`docs/mac-media-fixture-runbook.md`](docs/mac-media-fixture-runbook.md) before starting it. The
+latest frozen Mac-only result is recorded in
+[`docs/evidence/video-path-mac-runtime.md`](docs/evidence/video-path-mac-runtime.md).
 Mac synthetic playback and latency evidence do not verify G520 or the aircraft camera and cannot
 close issue #7.
