@@ -52,6 +52,9 @@ android {
         versionCode = 1
         versionName = "0.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     flavorDimensions += "adapter"
@@ -183,12 +186,39 @@ tasks.matching { it.name == "assembleMockDebug" }.configureEach {
 dependencies {
     coreLibraryDesugaring(libs.desugar.jdk.libs)
 
+    implementation(project(":vision-opencv-android"))
     "mockImplementation"(project(":console-adapter-mock"))
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.junit)
     androidTestImplementation(libs.okhttp)
+}
+
+val verifyOpenCvRuntimeDependencies by tasks.registering {
+    group = "verification"
+    description = "Rejects desktop OpenCV artifacts from the Android host runtime."
+    doLast {
+        val components =
+            configurations.getByName("mockDebugRuntimeClasspath")
+                .incoming.resolutionResult.allComponents
+                .map { it.id.displayName }
+                .toSet()
+        require("org.opencv:opencv:4.9.0" in components) {
+            "host runtime must contain the official OpenCV Android 4.9.0 distribution"
+        }
+        val forbidden = components.filter { component ->
+            component.contains("vision-opencv-desktop", ignoreCase = true) ||
+                component.contains("openpnp", ignoreCase = true)
+        }
+        require(forbidden.isEmpty()) {
+            "host runtime contains desktop OpenCV dependencies: ${forbidden.sorted()}"
+        }
+    }
+}
+
+tasks.named("check") {
+    dependsOn(verifyOpenCvRuntimeDependencies)
 }
 
 tasks.withType<Test>().configureEach {

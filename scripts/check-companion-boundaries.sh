@@ -26,6 +26,38 @@ for module in capability-matrix console-protocol console-server console-adapter-
     fi
 done
 
+for module in vision-opencv-core vision-opencv-desktop; do
+    source_root="$REPO_ROOT/$module/src"
+    if rg -n --glob '*.kt' \
+        '^[[:space:]]*import[[:space:]]+(android|androidx|dji)(\.|$)' \
+        "$source_root"; then
+        echo "[companion-boundary] $module must stay free of Android and DJI imports" >&2
+        exit 1
+    fi
+done
+
+if rg -n --glob '*.kt' \
+    '^[[:space:]]*import[[:space:]]+(org\.opencv|nu\.pattern)(\.|$)' \
+    "$REPO_ROOT/host-headless/src/main"; then
+    echo "[companion-boundary] host-headless must consume only the vendor-neutral OpenCV facade" >&2
+    exit 1
+fi
+
+if rg -n --glob '*.kt' \
+    '^[[:space:]]*import[[:space:]]+nu\.pattern(\.|$)' \
+    "$REPO_ROOT/vision-opencv-android/src"; then
+    echo "[companion-boundary] Android artifacts must not import the desktop OpenCV loader" >&2
+    exit 1
+fi
+
+if rg -n \
+    '^[[:space:]]*(api|implementation|runtimeOnly|compileOnly)\([^)]*org\.openpnp:opencv' \
+    "$REPO_ROOT/vision-opencv-android/build.gradle.kts" \
+    "$REPO_ROOT/host-headless/build.gradle.kts"; then
+    echo "[companion-boundary] Android artifacts must not depend on the desktop OpenCV runtime" >&2
+    exit 1
+fi
+
 if rg -n \
     'com\.durendal\.droneagent:|project\(":(core|gateway|vision|drone-actuation|adapter)' \
     "$REPO_ROOT/console-protocol/build.gradle.kts"; then

@@ -284,6 +284,12 @@ API 34 emulator，G520 commissioning、OEM policy 與 aircraft-side process-loss
 `drone-observation` 接收 decoded frames，執行第一個經人類確認的 recognition／tracking
 pipeline。RTMP／WHEP 是人眼觀看鏈，不能取代 decoded-frame CV input。
 
+第一個 target 固定為亮色地面上的深色膠帶 segmentation。core 與平台 runtime 共用
+同一個 native self-test fixture；Mac pin `org.openpnp:opencv:4.9.0-0`，Android pin
+官方 `org.opencv:opencv:4.9.0` 並只包 arm64-v8a。fixture 成功只能驗證 native loader、
+OpenCV operation 與 segmentation contract，不能取代 `DecodedFrameStream` 或 G520
+commissioning evidence。
+
 先在 Mac fixture/replay 驗證演算法，再於 emulator 驗證 packaging boundary；真正
 完成仍需在 G520 Android 上識別 native library 與 runtime build information，並以
 實際 frame → OpenCV operation → recognition result／evidence 證明執行路徑。

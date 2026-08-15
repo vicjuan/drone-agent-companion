@@ -113,9 +113,19 @@ fallback，APK 並沒有 OpenCV native runtime。因此「重用 `vision`」本�
 
 Mac 上的 OpenCV fixture/replay 測試只能證明演算法；完成條件必須包含 G520 Android
 產物內的 native library 識別，以及 runtime log／result 證明實際呼叫 OpenCV。初始
-辨識目標與 OpenCV Android distribution 選型由 #14 落實，但「on-device 必須使用
-OpenCV」不是 open decision。RTMP → MediaMTX → WHEP 是給人眼觀看的另一條鏈，
-不得把 WHEP player 當作 CV input。
+辨識目標已選定為「亮色地面上的深色膠帶 segmentation」：它直接沿用既有
+`LuminanceFrame`／`Segmenter` contract，可在 deterministic fixture 上驗 native
+execution，後續也能接到 decoded NV21 frame 與 centerline／tracking pipeline。這個
+選型不是物件偵測或自主飛行能力聲明。
+
+runtime 選型固定在 OpenCV 4.9：Mac 使用 `org.openpnp:opencv:4.9.0-0` 與 desktop
+loader；Android 使用官方 Maven AAR `org.opencv:opencv:4.9.0`、
+`OpenCVLoader.initLocal()` 與 arm64-v8a packaging。兩個平台必須執行同一個
+32×24、六像素寬膠帶的 native self-test fixture，回報版本、native build-information
+SHA-256、segmentation latency 與 mask IoU。這只證明 loader／演算法／產物接線；在
+G520 decoded-frame evidence 出現前，`opencv_on_device_recognition` 仍維持
+`UNKNOWN`。RTMP → MediaMTX → WHEP 是給人眼觀看的另一條鏈，不得把 WHEP player
+當作 CV input。
 
 沿用的機械檢查（vendor-neutral guard、APK boundary guard、
 closed-loop-not-executed guard）隨 submodule 一併生效，CI 必須執行。
@@ -176,9 +186,7 @@ G520 Android 上驗證固定 IP、指定介面 bind、開機可達性與 WebSock
 1. **MediaMTX 位置**：G520 機上（aarch64 binary 可行性）vs 地面站筆電。
 2. **USB 權限策略**：system/priv-app 自動授權 vs 一次性人工授權後記憶。
 3. **web console 產品化認證與傳輸安全**：區網 TLS（自簽憑證）與 token 佈建方式。
-4. **OpenCV 實作選型**：Android distribution／native packaging 方式與第一個可驗收的
-   visual-recognition target（#14）；使用 OpenCV 本身已定案。
-5. **G520 fresh-install 第一次啟用**：emulator 可由同 candidate 的 test instrumentation
+4. **G520 fresh-install 第一次啟用**：emulator 可由同 candidate 的 test instrumentation
    明確解除 stopped state，但 production APK 無 Activity，receiver／service 皆
    `exported=false`。#8 必須選定 system image、Device Owner、privileged installer 或受控
    supervisor，並以真機證據證明一次性 commissioning 不會開出一般網路命令旁路。
