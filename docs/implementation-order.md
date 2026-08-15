@@ -244,12 +244,24 @@ admission 可用；一般 process death 後恢復並留下新 PID／restart evid
 flush；force-stop 負向測試維持停止。所有結果最高只到 emulator `RUNTIME_VERIFIED`，matrix
 仍全為 `UNKNOWN`。
 
-**2026-08-15 實作狀態**：已建立 minSdk 26／targetSdk 34 的 Activity-free mock flavor、
+**2026-08-16 實作狀態**：已建立 minSdk 26／targetSdk 34 的 Activity-free mock flavor、
 non-exported boot receiver 與 `connectedDevice` foreground service；service 在 `:agent` process
 承載 S3 server + mock agent，SPA 由固定 allowlist/SHA assets 原子安裝，lifecycle/restart
-evidence 以 app-private、bounded、fsync journal 保存。targeted JVM tests、Android production
-compile 與 instrumentation compile 已建立；frozen APK、emulator runtime、boot/restart 與
-force-stop lane 尚未執行，不得宣稱 Android runtime 已完成。
+evidence 以 app-private、bounded、fsync journal 保存。
+
+API 34 arm64 emulator 已達 `RUNTIME_VERIFIED`：candidate `c3fec9c` 的 connected lane 3/3
+通過，直接驗證 Android POSIX audit、一般 `:agent` process death 後新 PID／durable restart，
+以及 foreground Ktor／SPA／strict WebSocket／lease／takeoff／safe-stop 路徑。後續
+candidate `876b9f12977c572a23ca8d3636a1405727a485c6` 只改 androidTest provisioning、驗證腳本與
+文件；production 的 17 個 DEX 與 `c3fec9c` 逐一 byte-identical。它的唯一 lifecycle lane
+亦通過：fresh install `stopped=true, notLaunched=true`、無副作用 instrumentation 明確啟用、
+真實 reboot 後 15 秒內 health、boot ID 變更、全新 PID／durable boot evidence、strict
+forwarded WebSocket mock takeoff，最後 force-stop 維持停止。target／test APK SHA-256 分別為
+`9e121c3eb5a9e9b8f23781473754760aa7cdffc0680c852499d5a14046db2376` 與
+`b405c658372e0553c8fc406996da980767a5f42ee93fde90af81428a74f6037a`；本機原始證據在
+`host-headless/build/emulator-evidence/20260815T164604Z-84563/`。這些結果只證明 mock +
+API 34 emulator，G520 commissioning、OEM policy 與 aircraft-side process-loss failsafe 仍未
+驗證，matrix 全列維持 `UNKNOWN`。
 
 ### S9　影像鏈路的無硬體部分（issue #7 的一半）
 
