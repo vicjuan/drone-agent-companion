@@ -290,6 +290,12 @@ pipeline。RTMP／WHEP 是人眼觀看鏈，不能取代 decoded-frame CV input�
 OpenCV operation 與 segmentation contract，不能取代 `DecodedFrameStream` 或 G520
 commissioning evidence。
 
+2026-08-16 的 frozen candidate `498cf519…e62dd` 已在 Mac 與 API 34 arm64 emulator
+實際執行同一 fixture；APK native／dependency boundary 亦通過。完整 hash、runtime
+identity、latency 與限制見
+[`opencv-runtime-evidence-498cf51.md`](opencv-runtime-evidence-498cf51.md)。此證據沒有
+decoded frame 或 G520 硬體，故 #14 仍未完成且 matrix 維持 `UNKNOWN`。
+
 先在 Mac fixture/replay 驗證演算法，再於 emulator 驗證 packaging boundary；真正
 完成仍需在 G520 Android 上識別 native library 與 runtime build information，並以
 實際 frame → OpenCV operation → recognition result／evidence 證明執行路徑。
