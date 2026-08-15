@@ -228,6 +228,12 @@ Android 平台不允許一般 app 在 `am force-stop` 後自行解除 stopped st
 - `force-stop`：預期持續停止、無 PID、無 health，直到外部明確 commissioning start；
 - app-owned safe stop：先 neutral／close／fsync，再停止 foreground service。
 
+API 34 emulator 的 fresh-install 第一次啟用由同 candidate 的專用、無 service side effect
+instrumentation 明確完成；它只解除 stopped state，真正 server 啟動仍必須來自後續系統
+boot broadcast。這不是 G520 production commissioning：Activity-free、non-exported APK 在
+fresh sideload 後沒有 operator 可直接啟動的 production 元件，#8 必須另行選定 system
+image／Device Owner／privileged installer／受控 supervisor 的一次性啟用方式並取得真機證據。
+
 **注意**：emulator 通過**不代表** G520 通過。開機自啟行為、廠商省電策略、
 foreground service 是否被回收，都必須在真板上重驗。這一列在 matrix 裡維持
 `UNKNOWN`。

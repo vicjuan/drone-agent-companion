@@ -178,5 +178,9 @@ G520 Android 上驗證固定 IP、指定介面 bind、開機可達性與 WebSock
 3. **web console 產品化認證與傳輸安全**：區網 TLS（自簽憑證）與 token 佈建方式。
 4. **OpenCV 實作選型**：Android distribution／native packaging 方式與第一個可驗收的
    visual-recognition target（#14）；使用 OpenCV 本身已定案。
+5. **G520 fresh-install 第一次啟用**：emulator 可由同 candidate 的 test instrumentation
+   明確解除 stopped state，但 production APK 無 Activity，receiver／service 皆
+   `exported=false`。#8 必須選定 system image、Device Owner、privileged installer 或受控
+   supervisor，並以真機證據證明一次性 commissioning 不會開出一般網路命令旁路。
 
-最後更新：2026-08-15。
+最後更新：2026-08-16。

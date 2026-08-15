@@ -43,13 +43,26 @@ Instrumentation 會驗證 foreground service 內的實際 Ktor `/healthz`、SPA�
 hello/runtime/telemetry、全 `UNKNOWN` capability、lease、takeoff admission/result、safe stop
 及同 UID `:agent` process death 後的新 PID／sticky restart evidence。
 
-完成 connected lane（它也完成第一次明確啟用）後，再驗 boot 與 force-stop 負向路徑：
+完成 connected lane 後，再驗 boot 與 force-stop 負向路徑。Android Test Orchestrator／UTP
+會在 connected lane 結束時卸載 target；fresh sideload 又會把 Activity-free package 設為
+`stopped=true, notLaunched=true`，因此不能假設 connected 的明確啟用狀態仍存在。lifecycle
+腳本會先 fresh uninstall/install target 與同一 candidate 的 androidTest helper，再只執行一個
+不啟動 service 的 provisioning instrumentation，合法解除 stopped state後才進入真正 reboot：
 
 ```bash
 scripts/verify-headless-emulator-lifecycle.sh \
   host-headless/build/outputs/apk/mock/debug/host-headless-mock-debug.apk \
+  host-headless/build/outputs/apk/androidTest/mock/debug/host-headless-mock-debug-androidTest.apk \
   emulator-5554
 ```
+
+這個步驟會清除 emulator 上該 mock package 的既有 app data，並在結束時移除 helper APK。
+provisioning 前腳本必須看到 fresh target 為 `stopped=true, notLaunched=true`；instrumentation
+只載入 target Application，核對 target／helper 內嵌的 candidate 身分，不得呼叫 receiver、
+service 或建立 lifecycle journal。helper 移除後，腳本再要求 target 為
+`stopped=false, notLaunched=false`、main／`:agent` process 均不存在、health 不可達且沒有
+lifecycle current／previous。第一筆 lifecycle evidence 與第一個 `:agent` PID因此只能由後續
+真實 reboot 的系統 boot broadcast 產生。
 
 腳本固定建立 `host 127.0.0.1:18080 → device 127.0.0.1:8080` forward；不能任意換 host
 port，因為 Android mock server 的 exact WebSocket Origin gate 也固定為
@@ -63,19 +76,20 @@ dirty／uncommitted worktree，並
 `ro.kernel.qemu.avd_name`、device shell 的 `AVD_NAME`；皆無資料時 fail closed，不會用
 serial 猜測。
 
-腳本會把 bounded、單行化的裝置身分寫入 `device-identity.txt`，核對 installed base APK
-SHA，並要求 built／installed APK 內的 `assets/companion-candidate/commit.txt` 都等於當前 clean
-HEAD，且 `worktree-state.txt` 都記錄 identity generator 當時觀察到 `clean`，避免把一般的
-舊或 dirty APK runtime 誤標到該 commit。重開後的 runtime smoke 前後也會重新 pull／hash
-installed APK，並鎖定同一個 `:agent` PID。這是 frozen lane 的受信任 operator 程序 guard；
+腳本會把 bounded、單行化的裝置身分寫入 `device-identity.txt`，核對 installed target／helper
+APK SHA，並要求兩個 built／installed APK 內的 `assets/companion-candidate/commit.txt` 都等於
+當前 clean HEAD，且 `worktree-state.txt` 都記錄 identity generator 當時觀察到 `clean`，避免
+把一般的舊或 dirty APK runtime 誤標到該 commit。重開後的 runtime smoke 前後也會重新
+pull／hash installed target APK，鎖定同一個 `:agent` PID，並要求 Android kernel `boot_id`
+確實改變。這是 frozen lane 的受信任 operator 程序 guard；
 完整 assembly 結尾仍會重新檢查 clean HEAD，驗證期間禁止 `-x` 排除 identity task 或並行
 修改工作樹，但不把 marker 誇稱為抵抗惡意並行篡改的原子 attestation。之後重開 emulator、
 確認 boot receiver 後 PID、health 與 SPA，並從 Mac 端透過同一 adb
 forward 執行 strict WebSocket Upgrade（含 exact Origin）、hello、mock runtime、lease 與
 takeoff admission/result。WebSocket 驗證摘要會寫入 `ws-forwarded.json`，其 SHA-256 也會
-收進 summary。接著腳本會合併 current／previous journal，並以 reboot 前的 device epoch
-與既有 journal 最大 epoch 作嚴格水位；`adb reboot` 必須實際觀察到 disconnect，且只接受
-水位之後的新 boot 與相符 PID runtime evidence，因此 rotation／PID reuse 不會讓舊資料假通過。
+收進 summary。接著腳本要求 fresh provisioning 的 lifecycle baseline 為空，並以 reboot 前的
+device epoch 作嚴格水位；`adb reboot` 必須實際觀察到 disconnect 與不同的 kernel `boot_id`，
+且只接受水位之後的新 boot 與相符 PID runtime evidence，因此 PID reuse 不會讓舊資料假通過。
 emulator 的明確時間界線是 `sys.boot_completed=1` 後 45 秒內出現 health；summary 會同時記錄
 實測秒數與 deadline。G520 的 cold-power-on SLA 仍須真板另行訂定與驗證。
 最後 force-stop 並確認十秒內沒有 PID 或 health
@@ -92,6 +106,10 @@ Device Owner 或其他明確 commissioning 動作重新啟用。
 - lifecycle script 的 summary scope 只涵蓋 `boot_console_force_stop`，並明列它本身沒有
   證明 connected instrumentation；process-death／safe-stop 證據必須另以同一 frozen
   candidate 的 `connectedMockDebugAndroidTest` 原始退出結果支撐。
+- provisioning instrumentation 只是 emulator 的外部明確啟用工具，不是 G520 production
+  commissioning 機制。production APK 沒有 Activity，boot receiver／service 也都是
+  `exported=false`；G520 fresh install 必須由 #8 另行選定並以第一手證據驗證 system image、
+  Device Owner、privileged installer 或其他受控 supervisor 的一次性啟用流程。
 - `config/capability-matrix/g520-stack.json` 的 `headless_boot_service` 與所有硬體列維持
   `UNKNOWN`。
 - `adapter=mock`、companion-owned RTH simulation、Ktor Android runtime 都不是 G520 或

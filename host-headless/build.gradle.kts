@@ -79,6 +79,9 @@ android {
     sourceSets {
         getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/companionWebAssets"))
         getByName("main").assets.srcDir(generatedCandidateAssets)
+        // The emulator lifecycle harness must prove that its helper APK was built from the
+        // same frozen candidate as the target APK before it clears Android's stopped state.
+        getByName("androidTest").assets.srcDir(generatedCandidateAssets)
     }
 
     packaging {

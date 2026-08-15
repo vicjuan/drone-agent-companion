@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 1 || $# -gt 2 ]]; then
-    echo "usage: $0 <mock-debug-apk> [adb-serial]" >&2
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+    echo "usage: $0 <mock-debug-apk> <mock-debug-androidTest-apk> [adb-serial]" >&2
     exit 64
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 APK_PATH="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
-ADB_SERIAL="${2:-emulator-5554}"
+TEST_APK_PATH="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
+ADB_SERIAL="${3:-emulator-5554}"
 HOST_FORWARD_PORT=18080
 ADB_BIN="${ANDROID_HOME:-/Users/vic/Library/Android/sdk}/platform-tools/adb"
 PACKAGE_NAME="com.durendal.droneagent.companion.host.mock"
+TEST_PACKAGE_NAME="$PACKAGE_NAME.test"
+TARGET_PROCESS="$PACKAGE_NAME"
 AGENT_PROCESS="$PACKAGE_NAME:agent"
+PROVISIONING_TEST_CLASS="com.durendal.droneagent.companion.host.BootProvisioningInstrumentedTest"
+TEST_RUNNER="$TEST_PACKAGE_NAME/androidx.test.runner.AndroidJUnitRunner"
 DEVICE_PORT=8080
 HEALTH_READY_TIMEOUT_SECONDS=45
 DEVICE_LIFECYCLE_DIR="/data/user_de/0/$PACKAGE_NAME/files/headless-host/lifecycle"
@@ -28,6 +33,8 @@ PORT_LOCK_DIR="$LOCK_PARENT/host-port-$HOST_FORWARD_PORT"
 SERIAL_LOCK_ACQUIRED=false
 PORT_LOCK_ACQUIRED=false
 FORWARD_CREATED=false
+TEST_HELPER_INSTALLED=false
+TARGET_OWNED_BY_RUN=false
 
 require_command() {
     local command_name="$1"
@@ -49,21 +56,35 @@ if [[ ! -f "$APK_PATH" ]]; then
     echo "mock debug APK not found: $APK_PATH" >&2
     exit 66
 fi
+if [[ ! -f "$TEST_APK_PATH" ]]; then
+    echo "mock debug androidTest APK not found: $TEST_APK_PATH" >&2
+    exit 66
+fi
 
 adb_cmd() {
     "$ADB_BIN" -s "$ADB_SERIAL" "$@"
 }
 
 cleanup() {
+    local original_exit=$?
+    trap - EXIT
+    set +e
+    if [[ "$TARGET_OWNED_BY_RUN" == true ]]; then
+        adb_cmd shell am force-stop "$PACKAGE_NAME" >/dev/null 2>&1
+    fi
     if [[ "$FORWARD_CREATED" == true ]]; then
-        adb_cmd forward --remove "tcp:$HOST_FORWARD_PORT" >/dev/null 2>&1 || true
+        adb_cmd forward --remove "tcp:$HOST_FORWARD_PORT" >/dev/null 2>&1
+    fi
+    if [[ "$TEST_HELPER_INSTALLED" == true ]]; then
+        adb_cmd uninstall "$TEST_PACKAGE_NAME" >/dev/null 2>&1
     fi
     if [[ "$PORT_LOCK_ACQUIRED" == true ]]; then
-        rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
+        rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1
     fi
     if [[ "$SERIAL_LOCK_ACQUIRED" == true && -n "$SERIAL_LOCK_DIR" ]]; then
-        rmdir "$SERIAL_LOCK_DIR" >/dev/null 2>&1 || true
+        rmdir "$SERIAL_LOCK_DIR" >/dev/null 2>&1
     fi
+    exit "$original_exit"
 }
 trap cleanup EXIT
 
@@ -76,6 +97,24 @@ CANDIDATE_COMMIT="$(git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}')"
 if [[ ! "$CANDIDATE_COMMIT" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
     echo "could not resolve a bounded commit identity for HEAD" >&2
     exit 65
+fi
+APK_SHA256="$(shasum -a 256 "$APK_PATH" | awk '{print $1}')"
+TEST_APK_SHA256="$(shasum -a 256 "$TEST_APK_PATH" | awk '{print $1}')"
+if [[ ! "$APK_SHA256" =~ ^[0-9a-fA-F]{64}$ || ! "$TEST_APK_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "could not resolve bounded SHA-256 identities for the candidate APKs" >&2
+    exit 1
+fi
+BUILT_APK_COMMIT="$(unzip -p "$APK_PATH" assets/companion-candidate/commit.txt 2>/dev/null || true)"
+BUILT_TEST_APK_COMMIT="$(unzip -p "$TEST_APK_PATH" assets/companion-candidate/commit.txt 2>/dev/null || true)"
+BUILT_APK_WORKTREE_STATE="$(unzip -p "$APK_PATH" assets/companion-candidate/worktree-state.txt 2>/dev/null || true)"
+BUILT_TEST_APK_WORKTREE_STATE="$(unzip -p "$TEST_APK_PATH" assets/companion-candidate/worktree-state.txt 2>/dev/null || true)"
+if [[ "$BUILT_APK_COMMIT" != "$CANDIDATE_COMMIT" || "$BUILT_TEST_APK_COMMIT" != "$CANDIDATE_COMMIT" ]]; then
+    echo "target and androidTest APKs must embed the exact clean HEAD candidate" >&2
+    exit 1
+fi
+if [[ "$BUILT_APK_WORKTREE_STATE" != "clean" || "$BUILT_TEST_APK_WORKTREE_STATE" != "clean" ]]; then
+    echo "target and androidTest APKs must both be built from a clean worktree" >&2
+    exit 1
 fi
 
 mkdir -p "$EVIDENCE_PARENT" "$LOCK_PARENT"
@@ -110,6 +149,110 @@ wait_for_boot() {
         sleep 1
     done
     echo "emulator did not report sys.boot_completed=1" >&2
+    return 1
+}
+
+read_boot_id() {
+    local boot_id
+    boot_id="$(sanitize_single_line "$(adb_cmd shell cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)")"
+    if [[ ! "$boot_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+        echo "could not capture a bounded Android boot_id" >&2
+        return 1
+    fi
+    printf '%s' "$boot_id"
+}
+
+uninstall_if_present() {
+    local package_name="$1"
+    if adb_cmd shell pm path "$package_name" >/dev/null 2>&1; then
+        local result
+        result="$(adb_cmd uninstall "$package_name")"
+        if [[ "$(sanitize_single_line "$result")" != "Success" ]]; then
+            echo "failed to uninstall existing package $package_name" >&2
+            return 1
+        fi
+    fi
+}
+
+require_package_user_state() {
+    local evidence_file="$1"
+    local expected_stopped="$2"
+    local expected_not_launched="$3"
+    if ! rg -q "User 0:.*stopped=$expected_stopped.*notLaunched=$expected_not_launched" "$evidence_file"; then
+        echo "package user state did not reach stopped=$expected_stopped notLaunched=$expected_not_launched" >&2
+        return 1
+    fi
+}
+
+query_process_pid() {
+    local process_name="$1"
+    local output
+    local status
+    set +e
+    output="$(adb_cmd shell pidof "$process_name" 2>/dev/null | tr -d '\r')"
+    status=$?
+    set -e
+    if (( status == 0 )); then
+        if [[ ! "$output" =~ ^[0-9]+([[:space:]][0-9]+)*$ ]]; then
+            echo "pidof returned malformed output for $process_name" >&2
+            return 2
+        fi
+        printf '%s' "$output"
+        return 0
+    fi
+    if (( status == 1 )) && [[ -z "$output" ]]; then
+        if [[ "$(adb_cmd get-state 2>/dev/null || true)" != "device" ]] || \
+            ! adb_cmd shell true >/dev/null 2>&1; then
+            echo "adb transport was unavailable while querying $process_name" >&2
+            return 2
+        fi
+        return 1
+    fi
+    echo "could not query process state for $process_name" >&2
+    return 2
+}
+
+require_no_process() {
+    local process_name="$1"
+    local phase="$2"
+    local pid
+    local status
+    if pid="$(query_process_pid "$process_name")"; then
+        echo "$process_name unexpectedly remained alive during $phase (pid '$pid')" >&2
+        return 1
+    else
+        status=$?
+        if (( status != 1 )); then
+            return "$status"
+        fi
+    fi
+}
+
+wait_for_no_process() {
+    local process_name="$1"
+    local phase="$2"
+    local deadline=$((SECONDS + 10))
+    local consecutive_absent=0
+    while (( SECONDS < deadline )); do
+        local status
+        if query_process_pid "$process_name" >/dev/null; then
+            consecutive_absent=0
+            sleep 0.2
+            continue
+        else
+            status=$?
+            if (( status == 1 )); then
+                consecutive_absent=$((consecutive_absent + 1))
+                if (( consecutive_absent >= 5 )); then
+                    return 0
+                fi
+                sleep 0.2
+                continue
+            fi
+            return "$status"
+        fi
+    done
+    echo "$process_name did not remain absent for the required stable window during $phase" >&2
     return 1
 }
 
@@ -203,13 +346,22 @@ capture_device_identity() {
 }
 
 wait_for_agent_pid() {
-    local deadline=$((SECONDS + 45))
+    local deadline="$1"
     while (( SECONDS < deadline )); do
         local pid
-        pid="$(adb_cmd shell pidof "$AGENT_PROCESS" 2>/dev/null | tr -d '\r' || true)"
-        if [[ "$pid" =~ ^[0-9]+$ ]]; then
-            echo "$pid"
-            return 0
+        local status
+        if pid="$(query_process_pid "$AGENT_PROCESS")"; then
+            if [[ "$pid" =~ ^[0-9]+$ ]]; then
+                echo "$pid"
+                return 0
+            fi
+            echo "headless agent unexpectedly has multiple PIDs: $pid" >&2
+            return 1
+        else
+            status=$?
+            if (( status != 1 )); then
+                return "$status"
+            fi
         fi
         sleep 1
     done
@@ -221,7 +373,10 @@ require_agent_pid() {
     local expected_pid="$1"
     local phase="$2"
     local actual_pid
-    actual_pid="$(adb_cmd shell pidof "$AGENT_PROCESS" 2>/dev/null | tr -d '\r' || true)"
+    if ! actual_pid="$(query_process_pid "$AGENT_PROCESS")"; then
+        echo "agent process is unavailable during $phase" >&2
+        return 1
+    fi
     if [[ "$actual_pid" != "$expected_pid" ]]; then
         echo "agent PID changed during $phase (expected $expected_pid, got '$actual_pid')" >&2
         return 1
@@ -229,7 +384,7 @@ require_agent_pid() {
 }
 
 wait_for_health() {
-    local deadline=$((SECONDS + HEALTH_READY_TIMEOUT_SECONDS))
+    local deadline="$1"
     while (( SECONDS < deadline )); do
         local body
         body="$(curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$HOST_FORWARD_PORT/healthz" 2>/dev/null || true)"
@@ -254,6 +409,11 @@ wait_for_reboot_evidence() {
             adb_cmd exec-out run-as "$PACKAGE_NAME" cat "$DEVICE_LIFECYCLE_PREVIOUS_FILE" \
                 >> "$EVIDENCE_DIR/lifecycle-after-reboot.jsonl"
         fi
+        if ! adb_cmd shell run-as "$PACKAGE_NAME" test -f "$DEVICE_LIFECYCLE_FILE" \
+            >/dev/null 2>&1; then
+            sleep 1
+            continue
+        fi
         adb_cmd exec-out run-as "$PACKAGE_NAME" cat "$DEVICE_LIFECYCLE_FILE" \
             >> "$EVIDENCE_DIR/lifecycle-after-reboot.jsonl"
         if python3 -c \
@@ -272,39 +432,103 @@ wait_for_reboot_evidence() {
 echo "[headless-emulator] target=$ADB_SERIAL package=$PACKAGE_NAME"
 wait_for_boot
 capture_device_identity
-adb_cmd shell pm path "$PACKAGE_NAME" > "$EVIDENCE_DIR/package-path-before-reboot.txt"
 
+echo "[headless-emulator] provisioning a fresh Activity-free candidate"
+uninstall_if_present "$TEST_PACKAGE_NAME"
+uninstall_if_present "$PACKAGE_NAME"
+TARGET_OWNED_BY_RUN=true
+require_no_process "$TARGET_PROCESS" "fresh install preparation"
+require_no_process "$AGENT_PROCESS" "fresh install preparation"
+
+adb_cmd install "$APK_PATH" > "$EVIDENCE_DIR/target-install.txt"
+if ! rg -q '^Success\r?$' "$EVIDENCE_DIR/target-install.txt"; then
+    echo "target APK installation did not report Success" >&2
+    exit 1
+fi
+adb_cmd shell dumpsys package "$PACKAGE_NAME" > "$EVIDENCE_DIR/package-after-fresh-install.txt"
+require_package_user_state "$EVIDENCE_DIR/package-after-fresh-install.txt" true true
+require_no_process "$TARGET_PROCESS" "fresh stopped install"
+require_no_process "$AGENT_PROCESS" "fresh stopped install"
+
+adb_cmd install -t "$TEST_APK_PATH" > "$EVIDENCE_DIR/test-install.txt"
+if ! rg -q '^Success\r?$' "$EVIDENCE_DIR/test-install.txt"; then
+    echo "androidTest APK installation did not report Success" >&2
+    exit 1
+fi
+TEST_HELPER_INSTALLED=true
+adb_cmd shell dumpsys package "$PACKAGE_NAME" > "$EVIDENCE_DIR/package-after-helper-install.txt"
+require_package_user_state "$EVIDENCE_DIR/package-after-helper-install.txt" true true
+
+adb_cmd shell pm path "$PACKAGE_NAME" > "$EVIDENCE_DIR/package-path-before-reboot.txt"
+adb_cmd shell pm path "$TEST_PACKAGE_NAME" > "$EVIDENCE_DIR/test-package-path-before-reboot.txt"
 REMOTE_APK="$(sed -n 's/^package://p' "$EVIDENCE_DIR/package-path-before-reboot.txt" | head -1 | tr -d '\r')"
-if [[ -z "$REMOTE_APK" ]]; then
-    echo "package is not installed; run the connected instrumentation lane first" >&2
-    exit 65
+REMOTE_TEST_APK="$(sed -n 's/^package://p' "$EVIDENCE_DIR/test-package-path-before-reboot.txt" | head -1 | tr -d '\r')"
+if [[ -z "$REMOTE_APK" || -z "$REMOTE_TEST_APK" ]]; then
+    echo "fresh target or androidTest package path is unavailable" >&2
+    exit 1
 fi
 adb_cmd pull "$REMOTE_APK" "$EVIDENCE_DIR/installed-base.apk" >/dev/null
-shasum -a 256 "$APK_PATH" "$EVIDENCE_DIR/installed-base.apk" > "$EVIDENCE_DIR/apk-sha256.txt"
-APK_SHA256="$(shasum -a 256 "$APK_PATH" | awk '{print $1}')"
+adb_cmd pull "$REMOTE_TEST_APK" "$EVIDENCE_DIR/installed-test.apk" >/dev/null
+shasum -a 256 \
+    "$APK_PATH" "$EVIDENCE_DIR/installed-base.apk" \
+    "$TEST_APK_PATH" "$EVIDENCE_DIR/installed-test.apk" \
+    > "$EVIDENCE_DIR/apk-sha256.txt"
 INSTALLED_APK_SHA256="$(shasum -a 256 "$EVIDENCE_DIR/installed-base.apk" | awk '{print $1}')"
-if [[ ! "$APK_SHA256" =~ ^[0-9a-fA-F]{64}$ || ! "$INSTALLED_APK_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
-    echo "could not resolve bounded SHA-256 identities for the APKs" >&2
+INSTALLED_TEST_APK_SHA256="$(shasum -a 256 "$EVIDENCE_DIR/installed-test.apk" | awk '{print $1}')"
+if [[ "$APK_SHA256" != "$INSTALLED_APK_SHA256" || "$TEST_APK_SHA256" != "$INSTALLED_TEST_APK_SHA256" ]]; then
+    echo "installed target or androidTest APK does not match the frozen candidate" >&2
     exit 1
 fi
-if [[ "$APK_SHA256" != "$INSTALLED_APK_SHA256" ]]; then
-    echo "installed APK does not match the frozen candidate" >&2
-    exit 1
-fi
-BUILT_APK_COMMIT="$(unzip -p "$APK_PATH" assets/companion-candidate/commit.txt 2>/dev/null || true)"
 INSTALLED_APK_COMMIT="$(unzip -p "$EVIDENCE_DIR/installed-base.apk" assets/companion-candidate/commit.txt 2>/dev/null || true)"
-if [[ ! "$BUILT_APK_COMMIT" =~ ^[0-9a-fA-F]{40,64}$ || \
-    "$BUILT_APK_COMMIT" != "$CANDIDATE_COMMIT" || \
-    "$INSTALLED_APK_COMMIT" != "$CANDIDATE_COMMIT" ]]; then
-    echo "APK embedded candidate commit does not match the clean HEAD" >&2
-    exit 1
-fi
-BUILT_APK_WORKTREE_STATE="$(unzip -p "$APK_PATH" assets/companion-candidate/worktree-state.txt 2>/dev/null || true)"
+INSTALLED_TEST_APK_COMMIT="$(unzip -p "$EVIDENCE_DIR/installed-test.apk" assets/companion-candidate/commit.txt 2>/dev/null || true)"
 INSTALLED_APK_WORKTREE_STATE="$(unzip -p "$EVIDENCE_DIR/installed-base.apk" assets/companion-candidate/worktree-state.txt 2>/dev/null || true)"
-if [[ "$BUILT_APK_WORKTREE_STATE" != "clean" || "$INSTALLED_APK_WORKTREE_STATE" != "clean" ]]; then
-    echo "APK was not built from a clean worktree" >&2
+INSTALLED_TEST_APK_WORKTREE_STATE="$(unzip -p "$EVIDENCE_DIR/installed-test.apk" assets/companion-candidate/worktree-state.txt 2>/dev/null || true)"
+if [[ "$INSTALLED_APK_COMMIT" != "$CANDIDATE_COMMIT" || "$INSTALLED_TEST_APK_COMMIT" != "$CANDIDATE_COMMIT" ]]; then
+    echo "installed target and androidTest APKs must embed the exact clean HEAD candidate" >&2
     exit 1
 fi
+if [[ "$INSTALLED_APK_WORKTREE_STATE" != "clean" || "$INSTALLED_TEST_APK_WORKTREE_STATE" != "clean" ]]; then
+    echo "installed target and androidTest APKs must both embed a clean worktree state" >&2
+    exit 1
+fi
+
+adb_cmd shell am instrument -w -r \
+    -e candidateCommit "$CANDIDATE_COMMIT" \
+    -e class "$PROVISIONING_TEST_CLASS" \
+    "$TEST_RUNNER" \
+    > "$EVIDENCE_DIR/boot-provisioning-instrumentation.txt"
+if ! rg -q '^OK \(1 test\)\r?$' "$EVIDENCE_DIR/boot-provisioning-instrumentation.txt" || \
+    ! rg -q '^INSTRUMENTATION_CODE: -1\r?$' "$EVIDENCE_DIR/boot-provisioning-instrumentation.txt"; then
+    echo "boot provisioning instrumentation did not complete exactly one passing test" >&2
+    exit 1
+fi
+adb_cmd shell dumpsys package "$PACKAGE_NAME" > "$EVIDENCE_DIR/package-after-provisioning.txt"
+require_package_user_state "$EVIDENCE_DIR/package-after-provisioning.txt" false false
+adb_cmd shell run-as "$PACKAGE_NAME" test ! -e "$DEVICE_LIFECYCLE_DIR"
+require_no_process "$AGENT_PROCESS" "provisioning instrumentation"
+
+TEST_UNINSTALL_RESULT="$(adb_cmd uninstall "$TEST_PACKAGE_NAME")"
+if [[ "$(sanitize_single_line "$TEST_UNINSTALL_RESULT")" != "Success" ]]; then
+    echo "failed to remove the boot provisioning helper" >&2
+    exit 1
+fi
+TEST_HELPER_INSTALLED=false
+adb_cmd shell dumpsys package "$PACKAGE_NAME" > "$EVIDENCE_DIR/package-after-helper-removal.txt"
+require_package_user_state "$EVIDENCE_DIR/package-after-helper-removal.txt" false false
+wait_for_no_process "$TARGET_PROCESS" "provisioning helper removal"
+wait_for_no_process "$AGENT_PROCESS" "provisioning helper removal"
+adb_cmd shell run-as "$PACKAGE_NAME" test ! -e "$DEVICE_LIFECYCLE_DIR"
+
+adb_cmd forward --no-rebind "tcp:$HOST_FORWARD_PORT" "tcp:$DEVICE_PORT" >/dev/null
+FORWARD_CREATED=true
+if curl --noproxy '*' -fsS --max-time 1 \
+    "http://127.0.0.1:$HOST_FORWARD_PORT/healthz" >/dev/null 2>&1; then
+    echo "provisioning unexpectedly started the console before reboot" >&2
+    exit 1
+fi
+adb_cmd forward --remove "tcp:$HOST_FORWARD_PORT" >/dev/null
+FORWARD_CREATED=false
+
 INSTALLED_PROTOCOL_DECODER="$EVIDENCE_DIR/installed-console-protocol.mjs"
 INSTALLED_CAPABILITY_MATRIX="$EVIDENCE_DIR/installed-g520-stack.json"
 unzip -p "$EVIDENCE_DIR/installed-base.apk" \
@@ -330,32 +554,25 @@ if [[ ! "$DEVICE_EPOCH_SECONDS" =~ ^[0-9]{9,12}$ ]]; then
 fi
 REBOOT_EPOCH_FLOOR_MS=$((DEVICE_EPOCH_SECONDS * 1000))
 : > "$EVIDENCE_DIR/lifecycle-before-reboot.jsonl"
-if adb_cmd shell run-as "$PACKAGE_NAME" test -f "$DEVICE_LIFECYCLE_PREVIOUS_FILE" \
-    >/dev/null 2>&1; then
-    adb_cmd exec-out run-as "$PACKAGE_NAME" cat "$DEVICE_LIFECYCLE_PREVIOUS_FILE" \
-        >> "$EVIDENCE_DIR/lifecycle-before-reboot.jsonl"
-fi
-adb_cmd exec-out run-as "$PACKAGE_NAME" cat "$DEVICE_LIFECYCLE_FILE" \
-    >> "$EVIDENCE_DIR/lifecycle-before-reboot.jsonl"
-PRE_REBOOT_MAX_EPOCH_MS="$(python3 -c \
-    'import json,sys; records=[json.loads(line) for line in open(sys.argv[1],encoding="utf-8") if line.strip()]; values=[r.get("epoch_ms") for r in records]; assert all(isinstance(v,int) and v>0 for v in values); print(max(values,default=0))' \
-    "$EVIDENCE_DIR/lifecycle-before-reboot.jsonl")"
-if [[ ! "$PRE_REBOOT_MAX_EPOCH_MS" =~ ^[0-9]{1,16}$ ]]; then
-    echo "could not capture a bounded pre-reboot lifecycle epoch" >&2
-    exit 1
-fi
-if (( PRE_REBOOT_MAX_EPOCH_MS > REBOOT_EPOCH_FLOOR_MS )); then
-    REBOOT_EPOCH_FLOOR_MS=$PRE_REBOOT_MAX_EPOCH_MS
-fi
+PRE_REBOOT_MAX_EPOCH_MS=0
+PRE_REBOOT_BOOT_ID="$(read_boot_id)"
 
 echo "[headless-emulator] rebooting to exercise LOCKED/BOOT_COMPLETED start"
 adb_cmd reboot
 wait_for_disconnect
 wait_for_boot
 BOOT_COMPLETED_HOST_SECONDS=$SECONDS
+BOOT_READY_DEADLINE=$((BOOT_COMPLETED_HOST_SECONDS + HEALTH_READY_TIMEOUT_SECONDS))
+POST_REBOOT_BOOT_ID="$(read_boot_id)"
+if [[ "$POST_REBOOT_BOOT_ID" == "$PRE_REBOOT_BOOT_ID" ]]; then
+    echo "Android boot_id did not change across adb reboot" >&2
+    exit 1
+fi
 adb_cmd forward --no-rebind "tcp:$HOST_FORWARD_PORT" "tcp:$DEVICE_PORT" >/dev/null
 FORWARD_CREATED=true
-BOOT_PID="$(wait_for_agent_pid)"
+BOOT_PID="$(wait_for_agent_pid "$BOOT_READY_DEADLINE")"
+wait_for_health "$BOOT_READY_DEADLINE" > "$EVIDENCE_DIR/health-after-reboot.json"
+BOOT_TO_HEALTH_SECONDS=$((SECONDS - BOOT_COMPLETED_HOST_SECONDS))
 adb_cmd shell pm path "$PACKAGE_NAME" > "$EVIDENCE_DIR/package-path-before-runtime.txt"
 PRE_RUNTIME_REMOTE_APK="$(sed -n 's/^package://p' "$EVIDENCE_DIR/package-path-before-runtime.txt" | head -1 | tr -d '\r')"
 if [[ -z "$PRE_RUNTIME_REMOTE_APK" ]]; then
@@ -368,8 +585,6 @@ if [[ "$PRE_RUNTIME_APK_SHA256" != "$APK_SHA256" ]]; then
     echo "installed APK changed during reboot" >&2
     exit 1
 fi
-wait_for_health > "$EVIDENCE_DIR/health-after-reboot.json"
-BOOT_TO_HEALTH_SECONDS=$((SECONDS - BOOT_COMPLETED_HOST_SECONDS))
 wait_for_reboot_evidence "$BOOT_PID" "$REBOOT_EPOCH_FLOOR_MS"
 python3 -c \
     'import json,sys; [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]' \
@@ -412,10 +627,17 @@ require_agent_pid "$BOOT_PID" "pre-force-stop evidence capture"
 
 echo "[headless-emulator] force-stop negative test (automatic recovery must not occur)"
 adb_cmd shell am force-stop "$PACKAGE_NAME"
-sleep 2
-for _ in {1..10}; do
-    if adb_cmd shell pidof "$AGENT_PROCESS" 2>/dev/null | rg -q '[0-9]'; then
+FORCE_STOP_DEADLINE=$((SECONDS + 10))
+sleep 1
+while (( SECONDS < FORCE_STOP_DEADLINE )); do
+    FORCE_STOP_PID_STATUS=0
+    FORCE_STOP_PID="$(query_process_pid "$AGENT_PROCESS")" || FORCE_STOP_PID_STATUS=$?
+    if (( FORCE_STOP_PID_STATUS == 0 )); then
         echo "force-stopped package unexpectedly recreated its agent process" >&2
+        exit 1
+    fi
+    if (( FORCE_STOP_PID_STATUS != 1 )); then
+        echo "could not verify force-stopped agent process absence" >&2
         exit 1
     fi
     if curl --noproxy '*' -fsS --max-time 1 \
@@ -426,6 +648,7 @@ for _ in {1..10}; do
     sleep 1
 done
 adb_cmd shell dumpsys package "$PACKAGE_NAME" > "$EVIDENCE_DIR/package-after-force-stop.txt"
+require_package_user_state "$EVIDENCE_DIR/package-after-force-stop.txt" true false
 adb_cmd shell pm path "$PACKAGE_NAME" > "$EVIDENCE_DIR/package-path-after-force-stop.txt"
 FORCE_STOP_REMOTE_APK="$(sed -n 's/^package://p' "$EVIDENCE_DIR/package-path-after-force-stop.txt" | head -1 | tr -d '\r')"
 if [[ -z "$FORCE_STOP_REMOTE_APK" ]]; then
@@ -450,14 +673,22 @@ fi
     printf '%s\n' "avd_source=$DEVICE_AVD_SOURCE"
     printf '%s\n' "abi=$DEVICE_ABI"
     printf '%s\n' "apk_sha256=$APK_SHA256"
+    printf '%s\n' "android_test_apk_sha256=$TEST_APK_SHA256"
+    printf '%s\n' "installed_android_test_apk_sha256=$INSTALLED_TEST_APK_SHA256"
     printf '%s\n' "pre_runtime_apk_sha256=$PRE_RUNTIME_APK_SHA256"
     printf '%s\n' "runtime_apk_sha256=$RUNTIME_APK_SHA256"
     printf '%s\n' "force_stop_apk_sha256=$FORCE_STOP_APK_SHA256"
     printf '%s\n' "apk_build_worktree_state=$BUILT_APK_WORKTREE_STATE"
+    printf '%s\n' "android_test_apk_build_worktree_state=$BUILT_TEST_APK_WORKTREE_STATE"
     printf '%s\n' "installed_console_protocol_sha256=$INSTALLED_PROTOCOL_DECODER_SHA256"
     printf '%s\n' "installed_capability_matrix_sha256=$INSTALLED_CAPABILITY_MATRIX_SHA256"
     printf '%s\n' "forwarded_websocket_evidence_sha256=$WS_EVIDENCE_SHA256"
     printf '%s\n' "boot_pid=$BOOT_PID"
+    printf '%s\n' "pre_reboot_boot_id=$PRE_REBOOT_BOOT_ID"
+    printf '%s\n' "post_reboot_boot_id=$POST_REBOOT_BOOT_ID"
+    printf '%s\n' "provisioning_initial_stopped_state=true"
+    printf '%s\n' "provisioning_final_stopped_state=false"
+    printf '%s\n' "provisioning_started_agent=false"
     printf '%s\n' "boot_to_health_seconds=$BOOT_TO_HEALTH_SECONDS"
     printf '%s\n' "boot_to_health_deadline_seconds=$HEALTH_READY_TIMEOUT_SECONDS"
     printf '%s\n' "force_stop_expected_recovery=false"
