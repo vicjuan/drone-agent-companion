@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "defaultRoute": { "expectedConnectedRouteCount": 2 } },
+  "expectedIssueCodes": ["MULTIPLE_EXPECTED_CONNECTED_ROUTE"]
+}

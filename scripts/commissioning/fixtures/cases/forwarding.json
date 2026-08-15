@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "forwarding": { "enabledInterfaceCount": 1 } },
+  "expectedIssueCodes": ["IP_FORWARDING_ENABLED"]
+}

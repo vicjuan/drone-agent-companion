@@ -16,7 +16,7 @@ if [[ -n "$(git -C "$VENDOR_ROOT" status --porcelain)" ]]; then
     exit 1
 fi
 
-for module in capability-matrix console-protocol console-server console-adapter-mock; do
+for module in capability-matrix commissioning-network console-protocol console-server console-adapter-mock; do
     source_root="$REPO_ROOT/$module/src"
     if rg -n --glob '*.kt' \
         '^[[:space:]]*import[[:space:]]+(android|androidx|dji|org\.opencv)(\.|$)' \

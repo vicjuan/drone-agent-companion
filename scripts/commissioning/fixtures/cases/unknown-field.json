@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "unexpected": "redacted-by-validator-output" },
+  "expectedIssueCodes": ["UNKNOWN_FIELD"]
+}

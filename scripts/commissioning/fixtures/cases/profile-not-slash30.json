@@ -1,0 +1,5 @@
+{
+  "profilePatch": { "operator": { "prefixLength": 24 } },
+  "snapshotPatch": { "ipv4": { "prefixLength": 24 } },
+  "expectedIssueCodes": ["PREFIX_MUST_BE_SLASH_30"]
+}

@@ -1,0 +1,8 @@
+{
+  "profilePatch": {
+    "g520": { "ipv4": "10.52.0.6" },
+    "console": { "origin": "http://10.52.0.6:8080" }
+  },
+  "snapshotPatch": { "routeToG520": { "targetAddress": "10.52.0.6" } },
+  "expectedIssueCodes": ["ENDPOINTS_NOT_IN_SAME_SUBNET"]
+}

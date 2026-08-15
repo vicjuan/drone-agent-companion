@@ -1,0 +1,4 @@
+{
+  "profilePatch": { "status": "MYSTERY" },
+  "expectedIssueCodes": ["UNKNOWN_STATUS"]
+}

@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "captureStatus": "COMPLETE",
+  "collector": {
+    "name": "windows-point-to-point-readonly",
+    "version": "1.0.0",
+    "capturedAtUtc": "2026-08-16T04:00:00.000Z",
+    "hostIdentitySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "profileSha256": "3c9d92bd5a17ee7a6e7a8c9d5dab01d965ea0d8917f88c73fed3b9f8e6986ff9"
+  },
+  "selector": {
+    "adapterGuid": "11111111-2222-3333-4444-555555555555",
+    "ifIndex": 12
+  },
+  "queries": {
+    "profileHash": { "complete": true, "status": "OK" },
+    "hostIdentity": { "complete": true, "status": "OK" },
+    "adapter": { "complete": true, "status": "OK" },
+    "ipv4": { "complete": true, "status": "OK" },
+    "dhcp": { "complete": true, "status": "OK" },
+    "gateway": { "complete": true, "status": "OK" },
+    "dns": { "complete": true, "status": "OK" },
+    "defaultRoute": { "complete": true, "status": "OK" },
+    "routeToG520": { "complete": true, "status": "OK" },
+    "ics": { "complete": true, "status": "OK" },
+    "bridge": { "complete": true, "status": "OK" },
+    "forwarding": { "complete": true, "status": "OK" }
+  },
+  "adapter": {
+    "exactMatchCount": 1,
+    "partialMatchCount": 0,
+    "adapterGuid": "11111111-2222-3333-4444-555555555555",
+    "pnpDeviceIdSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ifIndex": 12,
+    "operationalStatus": "Up"
+  },
+  "ipv4": {
+    "addressCount": 1,
+    "address": "10.52.0.1",
+    "prefixLength": 30,
+    "prefixOrigin": "Manual",
+    "suffixOrigin": "Manual",
+    "addressState": "Preferred"
+  },
+  "dhcp": { "state": "Disabled" },
+  "gateway": { "count": 0 },
+  "dns": { "serverCount": 0 },
+  "defaultRoute": {
+    "count": 0,
+    "expectedConnectedRouteCount": 1,
+    "unexpectedRouteCount": 0
+  },
+  "routeToG520": {
+    "sourceAddressResultCount": 1,
+    "routeResultCount": 1,
+    "targetAddress": "10.52.0.2",
+    "sourceInterfaceIndex": 12,
+    "routeInterfaceIndex": 12,
+    "sourceAddress": "10.52.0.1"
+  },
+  "ics": {
+    "enabledConnectionCount": 0,
+    "selectedAdapterEnabled": false
+  },
+  "bridge": {
+    "adapterCount": 0,
+    "enabledMemberCount": 0,
+    "selectedAdapterMember": false
+  },
+  "forwarding": {
+    "enabledInterfaceCount": 0,
+    "unknownStateCount": 0,
+    "selectedAdapterEnabled": false
+  }
+}

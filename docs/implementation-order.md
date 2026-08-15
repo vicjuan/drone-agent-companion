@@ -60,6 +60,7 @@ export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home
 ```text
 console-protocol   Kotlin/JVM   console wire model 與 codec
 capability-matrix  Kotlin/JVM   G520 evidence data、validator 與 Markdown renderer
+commissioning-network Kotlin/JVM 完整網路 inventory 的 fail-closed selection policy
 console-server     Kotlin/JVM   WebSocket server、靜態資源、政策接線
 console-runner     Kotlin/JVM   JDK-only 開發用 runner（對照 gateway-runner）
 web-console        TypeScript   瀏覽器 SPA
@@ -196,6 +197,12 @@ network bridge。
 **完成判準**：G520 開機後無人工操作即可使用固定 IP；Windows 瀏覽器可取得 SPA、
 維持 WebSocket 與取得 control lease；確認 server 沒有監聽其他介面；結果寫入
 evidence。這只能在真板上達到 `HARDWARE_VERIFIED`。
+
+**2026-08-16 準備狀態**：已新增 pure-JVM fail-closed network inventory policy，以及
+Windows 唯讀 collector／跨平台 validator。候選 `10.52.0.0/30` 與 adapter binding 仍是
+`UNVERIFIED_TEMPLATE`；Android Ethernet collector、指定 Network 的 listener、network-loss
+neutral、Windows 真機與 G520 evidence 都尚未完成。詳見
+[`g520-point-to-point-ethernet-commissioning.md`](g520-point-to-point-ethernet-commissioning.md)。
 
 ### S7　認證與傳輸安全產品化（issue #5，週末 MVP 後）
 

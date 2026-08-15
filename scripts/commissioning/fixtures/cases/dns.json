@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "dns": { "serverCount": 1 } },
+  "expectedIssueCodes": ["DNS_CONFIGURED"]
+}

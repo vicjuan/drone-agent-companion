@@ -1,0 +1,7 @@
+{
+  "snapshotPatch": {
+    "captureStatus": "PARTIAL",
+    "queries": { "ics": { "complete": false, "status": "MYSTERY" } }
+  },
+  "expectedIssueCodes": ["SNAPSHOT_INCOMPLETE", "UNKNOWN_STATUS"]
+}

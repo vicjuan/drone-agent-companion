@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "adapter": { "operationalStatus": "Down" } },
+  "expectedIssueCodes": ["ADAPTER_NOT_UP"]
+}

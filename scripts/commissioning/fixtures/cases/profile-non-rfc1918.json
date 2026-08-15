@@ -1,0 +1,12 @@
+{
+  "profilePatch": {
+    "operator": { "ipv4": "203.0.113.1" },
+    "g520": { "ipv4": "203.0.113.2" },
+    "console": { "origin": "http://203.0.113.2:8080" }
+  },
+  "snapshotPatch": {
+    "ipv4": { "address": "203.0.113.1" },
+    "routeToG520": { "targetAddress": "203.0.113.2", "sourceAddress": "203.0.113.1" }
+  },
+  "expectedIssueCodes": ["G520_IPV4_NOT_RFC1918", "OPERATOR_IPV4_NOT_RFC1918"]
+}

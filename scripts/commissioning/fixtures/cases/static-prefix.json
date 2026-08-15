@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "ipv4": { "prefixLength": 24 } },
+  "expectedIssueCodes": ["STATIC_PREFIX_MISMATCH"]
+}

@@ -1,0 +1,8 @@
+{
+  "profilePatch": { "operator": { "ipv4": "10.52.0.0" } },
+  "snapshotPatch": {
+    "ipv4": { "address": "10.52.0.0" },
+    "routeToG520": { "sourceAddress": "10.52.0.0" }
+  },
+  "expectedIssueCodes": ["OPERATOR_IPV4_NOT_USABLE_HOST"]
+}

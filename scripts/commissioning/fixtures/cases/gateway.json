@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "gateway": { "count": 1 } },
+  "expectedIssueCodes": ["GATEWAY_PRESENT"]
+}

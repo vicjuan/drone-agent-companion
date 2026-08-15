@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "bridge": { "adapterCount": 1 } },
+  "expectedIssueCodes": ["BRIDGE_PRESENT"]
+}

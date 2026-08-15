@@ -33,6 +33,8 @@ touch UI is replaced by an on-device web server operated from a browser.
   view of the canonical G520 evidence matrix.
 - [`docs/headless-emulator-runbook.md`](docs/headless-emulator-runbook.md): frozen API 34
   emulator build/runtime procedure and the force-stop safety boundary.
+- [`docs/g520-point-to-point-ethernet-commissioning.md`](docs/g520-point-to-point-ethernet-commissioning.md):
+  fail-closed Windows/G520 direct-Ethernet preparation and the remaining hardware gates.
 
 ## Workspace bootstrap
 
