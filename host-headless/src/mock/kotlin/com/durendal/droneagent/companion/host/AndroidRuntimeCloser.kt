@@ -42,17 +42,41 @@ internal class AndroidRuntimeCloser(
             val serverBudget =
                 (remainingMillis(deadlineNanos) / 4L)
                     .coerceIn(1L, MAX_SERVER_CLOSE_MILLIS)
-            runCatching { stopServerWithin(serverBudget) }.onFailure { closeFailed = true }
-            runCatching(initiateCoreStop).onFailure { closeFailed = true }
+            var initiationInterrupted = false
+            try {
+                stopServerWithin(serverBudget)
+            } catch (_: InterruptedException) {
+                closeFailed = true
+                initiationInterrupted = true
+            } catch (_: Throwable) {
+                closeFailed = true
+            }
+            try {
+                initiateCoreStop()
+            } catch (_: InterruptedException) {
+                closeFailed = true
+                initiationInterrupted = true
+            } catch (_: Throwable) {
+                closeFailed = true
+            }
+            if (initiationInterrupted) {
+                Thread.currentThread().interrupt()
+                return RuntimeCloseResult.TIMED_OUT
+            }
         }
 
         var cleanup = cleanupFuture
         if (cleanup == null) {
             val neutralBudget = remainingMillis(deadlineNanos).coerceAtLeast(1L)
             val neutralConfirmed =
-                runCatching { awaitNeutral(neutralBudget) }
-                    .onFailure { closeFailed = true }
-                    .getOrDefault(false)
+                try {
+                    awaitNeutral(neutralBudget)
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return RuntimeCloseResult.TIMED_OUT
+                } catch (_: Throwable) {
+                    false
+                }
             if (!neutralConfirmed) return RuntimeCloseResult.TIMED_OUT
             cleanup = cleanupExecutor.submit(Callable { cleanupAfterNeutral() })
             cleanupFuture = cleanup
@@ -65,8 +89,14 @@ internal class AndroidRuntimeCloser(
             complete(if (closeFailed) RuntimeCloseResult.FAILED else RuntimeCloseResult.CLOSED)
         } catch (_: TimeoutException) {
             RuntimeCloseResult.TIMED_OUT
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            RuntimeCloseResult.TIMED_OUT
         } catch (_: Throwable) {
-            complete(RuntimeCloseResult.FAILED)
+            // Cleanup ownership remains with this closer. A later explicit safe-stop may retry
+            // after a transient source/adapter failure instead of freezing a false terminal state.
+            cleanupFuture = null
+            RuntimeCloseResult.FAILED
         }
     }
 

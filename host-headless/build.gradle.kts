@@ -187,6 +187,8 @@ dependencies {
     coreLibraryDesugaring(libs.desugar.jdk.libs)
 
     implementation(project(":vision-opencv-android"))
+    // Observation-only decoded frames and LiveVisionBridge. This surface cannot name DJI control.
+    implementation("com.durendal.droneagent:drone-observation:local")
     "mockImplementation"(project(":console-adapter-mock"))
 
     testImplementation(libs.junit)

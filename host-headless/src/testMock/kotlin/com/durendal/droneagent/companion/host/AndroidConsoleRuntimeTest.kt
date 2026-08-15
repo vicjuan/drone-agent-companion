@@ -4,11 +4,23 @@ import com.durendal.droneagent.adapter.mock.MockDroneAgent
 import com.durendal.droneagent.companion.console.mock.MockConsoleSnapshotProvider
 import com.durendal.droneagent.companion.console.mock.ObservableMockReturnToHomePort
 import com.durendal.droneagent.companion.console.protocol.ActuationLockState
+import com.durendal.droneagent.companion.vision.opencv.OpenCvNativeInitializer
+import com.durendal.droneagent.companion.vision.opencv.OpenCvRuntimeIdentity
+import com.durendal.droneagent.core.connection.ConnectionState
+import com.durendal.droneagent.observation.DecodedFrameFormat
+import com.durendal.droneagent.observation.DecodedFrameListener
+import com.durendal.droneagent.observation.DecodedFrameStartResult
+import com.durendal.droneagent.observation.DecodedFrameStream
+import com.durendal.droneagent.observation.DecodedFrameStreamFactory
+import com.durendal.droneagent.vision.segment.Segmenter
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.ServerSocket
 import java.net.URL
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -63,6 +75,63 @@ class AndroidConsoleRuntimeTest {
         val audit = auditFile.readText()
         assertTrue(audit.contains("\"kind\":\"actuation_readiness_changed\""))
         assertTrue(audit.contains("\"kind\":\"server_stopped\""))
+    }
+
+    @Test
+    fun `optional observation source starts after agent connect and closes before agent shutdown`() {
+        val webRoot = temporaryFolder.newFolder("vision-web")
+        File(webRoot, "index.html").writeText("<html>headless</html>")
+        val agent = MockDroneAgent()
+        val sourceStartConnection = AtomicReference<ConnectionState>()
+        val sourceCloseConnection = AtomicReference<ConnectionState>()
+        val source = OrderingDecodedFrameStream(
+            onStart = { sourceStartConnection.set(agent.connection.state()) },
+            onClose = { sourceCloseConnection.set(agent.connection.state()) },
+        )
+        val session =
+            HeadlessOpenCvObservationSession(
+                streamFactory = DecodedFrameStreamFactory { source },
+                nativeInitializer = OpenCvNativeInitializer { TEST_OPENCV_IDENTITY },
+                segmenterFactory = { Segmenter { error("no synthetic frame is expected") } },
+                bridgeStopAwaitMillis = 50L,
+            )
+        val runtime =
+            AndroidConsoleRuntime(
+                config =
+                    AndroidConsoleRuntimeConfig(
+                        webRoot = webRoot,
+                        auditFile = temporaryFolder.root.resolve("vision/audit.jsonl"),
+                        bindPort = availablePort(),
+                    ),
+                agentFactory = { agent },
+                openCvObservationSessionFactory = { session },
+            )
+
+        runtime.start()
+        assertEquals(ConnectionState.AIRCRAFT_CONNECTED, sourceStartConnection.get())
+        assertEquals(listOf(DecodedFrameFormat.NV21), source.startedFormats.toList())
+        assertEquals(1, source.startCount.get())
+
+        source.failStop = true
+        runtime.requestStop()
+        assertEquals(RuntimeCloseResult.FAILED, runtime.closeWithin(2_000L))
+        assertEquals(ConnectionState.AIRCRAFT_CONNECTED, agent.connection.state())
+        assertNull(sourceCloseConnection.get())
+        assertEquals(0, source.closeCount.get())
+
+        source.failStop = false
+        assertEquals(RuntimeCloseResult.CLOSED, runtime.closeWithin(2_000L))
+        assertEquals(
+            "the observation source must close before MockDroneAgent.shutdown disconnects",
+            ConnectionState.AIRCRAFT_CONNECTED,
+            sourceCloseConnection.get(),
+        )
+        assertEquals(ConnectionState.DISCONNECTED, agent.connection.state())
+        assertEquals(3, source.stopCount.get())
+        assertEquals(1, source.closeCount.get())
+        assertTrue(source.listeners.isEmpty())
+        assertEquals(OpenCvObservationLifecycleState.CLOSED, session.snapshot().lifecycleState)
+        assertTrue(session.snapshot().finalMeasurement)
     }
 
     @Test
@@ -167,6 +236,52 @@ class AndroidConsoleRuntimeTest {
         } finally {
             agent.shutdown()
         }
+    }
+
+    private class OrderingDecodedFrameStream(
+        private val onStart: () -> Unit,
+        private val onClose: () -> Unit,
+    ) : DecodedFrameStream {
+        val listeners = CopyOnWriteArrayList<DecodedFrameListener>()
+        val startedFormats = CopyOnWriteArrayList<DecodedFrameFormat>()
+        val startCount = AtomicInteger(0)
+        val stopCount = AtomicInteger(0)
+        val closeCount = AtomicInteger(0)
+        @Volatile var failStop = false
+
+        override fun start(format: DecodedFrameFormat): DecodedFrameStartResult {
+            onStart()
+            startCount.incrementAndGet()
+            startedFormats += format
+            return DecodedFrameStartResult.Started
+        }
+
+        override fun stop() {
+            stopCount.incrementAndGet()
+            if (failStop) error("synthetic transient observation stop failure")
+        }
+
+        override fun addListener(listener: DecodedFrameListener) {
+            listeners += listener
+        }
+
+        override fun removeListener(listener: DecodedFrameListener) {
+            listeners -= listener
+        }
+
+        override fun close() {
+            onClose()
+            closeCount.incrementAndGet()
+        }
+    }
+
+    private companion object {
+        val TEST_OPENCV_IDENTITY =
+            OpenCvRuntimeIdentity(
+                version = "test-4.9.0",
+                platform = "jvm-test",
+                buildInformationSha256 = "b".repeat(64),
+            )
     }
 
     private fun awaitHealth(port: Int): String {
