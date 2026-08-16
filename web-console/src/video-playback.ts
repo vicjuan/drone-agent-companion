@@ -2,7 +2,10 @@ export const MEDIA_CONFIG_ENDPOINT = "/api/console/v1/media";
 
 const MEDIA_CONFIG_KEYS = ["pageUrl", "sourceKind", "streamId"] as const;
 const SYNTHETIC_SOURCE_KIND = "synthetic_mac" as const;
+const DJI_SOURCE_KIND = "dji_msdk" as const;
 const SYNTHETIC_MEDIA_HOST = "127.0.0.1";
+const DJI_MEDIA_HOST = "10.52.0.1";
+const DJI_MEDIA_PORT = "8891";
 const MAX_PAGE_URL_LENGTH = 2_048;
 const CANONICAL_STREAM_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const CREDENTIAL_PARAMETER_NAMES = new Set([
@@ -29,16 +32,24 @@ export type SyntheticMacVideoPlaybackConfig = Readonly<{
   pageUrl: string;
 }>;
 
+export type DjiVideoPlaybackConfig = Readonly<{
+  enabled: true;
+  sourceKind: typeof DJI_SOURCE_KIND;
+  streamId: string;
+  pageUrl: string;
+}>;
+
 export type VideoPlaybackConfig =
   | DisabledVideoPlaybackConfig
-  | SyntheticMacVideoPlaybackConfig;
+  | SyntheticMacVideoPlaybackConfig
+  | DjiVideoPlaybackConfig;
 
 export type VideoPlaybackState =
   | Readonly<{ phase: "loading" }>
   | Readonly<{ phase: "unavailable"; reason: "media_disabled" }>
   | Readonly<{
       phase: "configured";
-      config: SyntheticMacVideoPlaybackConfig;
+      config: SyntheticMacVideoPlaybackConfig | DjiVideoPlaybackConfig;
     }>
   | Readonly<{
       phase: "error";
@@ -58,8 +69,8 @@ export const INITIAL_VIDEO_PLAYBACK_STATE: VideoPlaybackState = Object.freeze({
 
 /**
  * Decodes the server-owned browser media bootstrap without trusting it as an iframe URL.
- * Only the Weekend MVP's loopback MediaMTX synthetic source is accepted. Any future source
- * kind or network placement must add an explicit reviewed policy instead of widening this one.
+ * Only the exact Mac loopback fixture or the frozen office point-to-point MediaMTX endpoint is
+ * accepted. Neither profile accepts credentials, redirects, query parameters or arbitrary hosts.
  */
 export function decodeVideoPlaybackConfig(value: unknown): VideoPlaybackConfig {
   const record = requirePlainRecord(value);
@@ -80,7 +91,7 @@ export function decodeVideoPlaybackConfig(value: unknown): VideoPlaybackConfig {
   if (nullFields !== 0) {
     throw new Error("Media config must be entirely enabled or entirely disabled");
   }
-  if (sourceKind !== SYNTHETIC_SOURCE_KIND) {
+  if (sourceKind !== SYNTHETIC_SOURCE_KIND && sourceKind !== DJI_SOURCE_KIND) {
     throw new Error("Media config sourceKind is not allowed");
   }
   if (
@@ -98,7 +109,7 @@ export function decodeVideoPlaybackConfig(value: unknown): VideoPlaybackConfig {
     throw new Error("Media config pageUrl must be a bounded URL string");
   }
 
-  const parsed = parseAllowedPageUrl(pageUrl, streamId);
+  const parsed = parseAllowedPageUrl(pageUrl, streamId, sourceKind);
   return Object.freeze({
     enabled: true,
     sourceKind,
@@ -151,6 +162,7 @@ export async function loadVideoPlayback(
 function parseAllowedPageUrl(
   pageUrl: string,
   streamId: string,
+  sourceKind: typeof SYNTHETIC_SOURCE_KIND | typeof DJI_SOURCE_KIND,
 ): URL {
   let parsed: URL;
   try {
@@ -159,10 +171,17 @@ function parseAllowedPageUrl(
     throw new Error("Media config pageUrl is not a valid absolute URL");
   }
   if (parsed.protocol !== "http:") {
-    throw new Error("Media config pageUrl must use loopback HTTP");
+    throw new Error("Media config pageUrl must use HTTP");
   }
-  if (parsed.hostname !== SYNTHETIC_MEDIA_HOST) {
-    throw new Error("Media config pageUrl must use canonical IPv4 loopback");
+  const expectedHost =
+    sourceKind === SYNTHETIC_SOURCE_KIND
+      ? SYNTHETIC_MEDIA_HOST
+      : DJI_MEDIA_HOST;
+  if (parsed.hostname !== expectedHost) {
+    throw new Error("Media config pageUrl must use the source profile's exact IPv4 host");
+  }
+  if (sourceKind === DJI_SOURCE_KIND && parsed.port !== DJI_MEDIA_PORT) {
+    throw new Error("DJI media config must use the office WHEP port");
   }
   if (parsed.port === "0") {
     throw new Error("Media config pageUrl port must be valid");

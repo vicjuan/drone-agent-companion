@@ -41,6 +41,19 @@ touch UI is replaced by an on-device web server operated from a browser.
   fail-closed Windows/G520 direct-Ethernet preparation and the remaining hardware gates.
 - [`docs/production-web-console-security.md`](docs/production-web-console-security.md):
   fail-closed exposure/authentication foundation and the remaining TLS/credential lifecycle gate.
+- [`docs/g520-office-mvp-runbook.md`](docs/g520-office-mvp-runbook.md): the single-branch,
+  fixed-Ethernet DJI office installation and startup path.
+
+## G520 office MVP candidate
+
+The cumulative branch `codex/g520-office-mvp-integration` adds the `djiDebug` flavor, RC-N3 USB
+accessory lifecycle, MSDK registration/connection, the fixed `10.52.0.0/30` Console, DJI RTMP to
+Windows MediaMTX, and decoded NV21 → OpenCV observation. Use the runbook above and
+`scripts/install-g520-office-mvp.sh`; do not substitute the Mac synthetic fixture for DJI video.
+
+Until a physical G520, RC-N3 and Mini 4 Pro have produced first-hand evidence from the exact APK,
+the capability matrix remains 17/17 `UNKNOWN` and this section is a candidate handoff, not a
+hardware-verification claim.
 
 ## Workspace bootstrap
 

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "version": "1.19.1",
+  "officeConfig": {
+    "fileName": "mediamtx-windows-g520.yml",
+    "sha256": "a182e84f69215eb32804af0c1f11da9e960c748fb96effaa9c10c88cdbd0f02f"
+  },
+  "archive": {
+    "fileName": "mediamtx_v1.19.1_windows_amd64.zip",
+    "url": "https://github.com/bluenviron/mediamtx/releases/download/v1.19.1/mediamtx_v1.19.1_windows_amd64.zip",
+    "sha256": "ca3d89c370bf73dc33ef9ee87afea04834f21b129f499d4b645490fcb01cce22"
+  },
+  "officialChecksums": {
+    "fileName": "checksums.sha256",
+    "url": "https://github.com/bluenviron/mediamtx/releases/download/v1.19.1/checksums.sha256",
+    "sha256": "d83130216365b86cfa210e7edd10251187c6a87994684dc0c5e80b77bad49db4"
+  },
+  "executable": {
+    "fileName": "mediamtx.exe",
+    "sha256": "40c3a2a957c434f6e6d38ede50a6c170cc7ebb74235e567ce6e85d26c887f5e8"
+  }
+}

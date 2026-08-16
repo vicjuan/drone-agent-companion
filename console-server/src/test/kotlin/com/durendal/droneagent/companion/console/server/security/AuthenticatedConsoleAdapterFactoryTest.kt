@@ -73,6 +73,7 @@ class AuthenticatedConsoleAdapterFactoryTest {
             fixture.controller.onText(
                 sessionId,
                 fixture.encodeHello("hello-failed-$index", presentedToken),
+                fixture.frames,
             )
 
             val error = fixture.frames.decoded().single().payload as ProtocolErrorPayload
@@ -97,6 +98,7 @@ class AuthenticatedConsoleAdapterFactoryTest {
         fixture.controller.onText(
             "session-1",
             fixture.encodeHello("hello-1", fixture.token),
+            fixture.frames,
         )
 
         val decoded = fixture.frames.decoded()
@@ -115,6 +117,7 @@ class AuthenticatedConsoleAdapterFactoryTest {
             fixture.codec.encodeClient(
                 ConsoleClientMessage("lease-1", LeaseAcquirePayload(5_000)),
             ),
+            fixture.frames,
         )
 
         assertTrue(fixture.coreAudit.events.any { it.kind == ConsoleAuditKind.LEASE_ACQUIRED })
@@ -163,6 +166,7 @@ class AuthenticatedConsoleAdapterFactoryTest {
                     fixture.controller.onText(
                         "session-handshaking",
                         fixture.encodeHello("hello-failed", wrongToken()),
+                        fixture.frames,
                     )
                 } catch (caught: Throwable) {
                     failure.set(caught)
@@ -206,6 +210,7 @@ class AuthenticatedConsoleAdapterFactoryTest {
                     fixture.controller.onText(
                         "session-handshaking",
                         fixture.encodeHello("hello-success", fixture.token),
+                        fixture.frames,
                     )
                 } catch (caught: Throwable) {
                     failure.set(caught)

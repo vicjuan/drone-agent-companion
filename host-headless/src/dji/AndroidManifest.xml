@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- RC-N3 uses Android Open Accessory. The host remains installable when the
+         G520 image exposes only one of these feature declarations. -->
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="false"
+        tools:replace="android:required" />
+    <uses-feature
+        android:name="android.hardware.usb.accessory"
+        android:required="false"
+        tools:replace="android:required" />
+
+    <application>
+        <!-- Supplied only from -PdjiApiKey or a non-committed Gradle property. -->
+        <meta-data
+            android:name="com.dji.sdk.API_KEY"
+            android:value="${djiApiKey}" />
+
+        <!-- One-shot commissioning entrypoint. It starts the locked foreground owner and exits;
+             it does not expose command execution or hardware authority. -->
+        <activity
+            android:name=".DjiCommissioningActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED" />
+            </intent-filter>
+            <!-- accessory_filter is supplied by the DJI MSDK AAR. -->
+            <meta-data
+                android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED"
+                android:resource="@xml/accessory_filter" />
+        </activity>
+    </application>
+</manifest>

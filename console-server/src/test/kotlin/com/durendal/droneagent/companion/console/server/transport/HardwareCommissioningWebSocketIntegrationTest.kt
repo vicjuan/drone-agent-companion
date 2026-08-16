@@ -65,6 +65,7 @@ import com.durendal.droneagent.companion.console.server.ConsoleSafetyTrigger
 import com.durendal.droneagent.companion.console.server.ConsoleServerCore
 import com.durendal.droneagent.companion.console.server.ConsoleServerCoreConfig
 import com.durendal.droneagent.companion.console.server.G520ProtocolCapabilitySource
+import com.durendal.droneagent.companion.console.server.security.ConsoleExposurePolicy
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocket
@@ -102,11 +103,9 @@ class HardwareCommissioningWebSocketIntegrationTest {
             testApplication {
                 application {
                     installConsoleApplication(
-                        ConsoleServerConfig(
-                            bindHost = "127.0.0.1",
-                            bindPort = 0,
+                        ConsoleServerConfig.create(
+                            exposure = ConsoleExposurePolicy.localhostDevelopment(bindPort = 0),
                             webRoot = webRoot,
-                            allowedBrowserOrigin = TEST_BROWSER_ORIGIN,
                         ),
                         fixture.controller,
                         sessionIdFactory = fixture::nextSessionId,
@@ -329,11 +328,9 @@ class HardwareCommissioningWebSocketIntegrationTest {
             testApplication {
                 application {
                     installConsoleApplication(
-                        ConsoleServerConfig(
-                            bindHost = "127.0.0.1",
-                            bindPort = 0,
+                        ConsoleServerConfig.create(
+                            exposure = ConsoleExposurePolicy.localhostDevelopment(bindPort = 0),
                             webRoot = webRoot,
-                            allowedBrowserOrigin = TEST_BROWSER_ORIGIN,
                         ),
                         fixture.controller,
                         sessionIdFactory = fixture::nextSessionId,

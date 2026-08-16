@@ -537,12 +537,17 @@ function renderVideoPlayback(state: VideoPlaybackState): void {
           : "影像設定未通過安全驗證；外部 frame 維持關閉。";
       return;
     case "configured": {
-      refs.videoStatus.textContent = "CONFIGURED / SYNTHETIC";
-      refs.videoStatus.dataset.tone = "synthetic";
+      const isDji = state.config.sourceKind === "dji_msdk";
+      refs.videoStatus.textContent = isDji
+        ? "CONFIGURED / DJI MSDK"
+        : "CONFIGURED / SYNTHETIC";
+      refs.videoStatus.dataset.tone = isDji ? "online" : "synthetic";
       refs.videoPlaceholder.hidden = true;
       const frame = document.createElement("iframe");
       frame.className = "video-frame";
-      frame.title = "Mac 合成影像播放器（非 G520 或飛機證據）";
+      frame.title = isDji
+        ? "DJI MSDK 即時影像播放器"
+        : "Mac 合成影像播放器（非 G520 或飛機證據）";
       frame.setAttribute("aria-label", frame.title);
       frame.setAttribute("aria-describedby", "video-truth");
       frame.sandbox.add("allow-scripts", "allow-same-origin");

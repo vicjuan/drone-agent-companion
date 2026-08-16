@@ -53,6 +53,34 @@ test("decoder accepts the canonical synthetic Mac MediaMTX page and freezes it",
   assert.ok(Object.isFrozen(decoded));
 });
 
+test("decoder accepts only the frozen DJI office MediaMTX endpoint", () => {
+  const decoded = decodeVideoPlaybackConfig({
+    sourceKind: "dji_msdk",
+    streamId: "dji-main",
+    pageUrl: "http://10.52.0.1:8891/dji-main",
+  });
+  assert.deepEqual(decoded, {
+    enabled: true,
+    sourceKind: "dji_msdk",
+    streamId: "dji-main",
+    pageUrl: "http://10.52.0.1:8891/dji-main",
+  });
+  for (const pageUrl of [
+    "http://10.52.0.2:8891/dji-main",
+    "http://10.52.0.1:8889/dji-main",
+    "https://10.52.0.1:8891/dji-main",
+  ]) {
+    assert.throws(
+      () => decodeVideoPlaybackConfig({
+        sourceKind: "dji_msdk",
+        streamId: "dji-main",
+        pageUrl,
+      }),
+      /source profile|office WHEP port|must use HTTP/,
+    );
+  }
+});
+
 test("decoder rejects missing and unknown response fields", () => {
   const missing = enabledConfig();
   delete missing.pageUrl;
@@ -121,7 +149,7 @@ test("decoder rejects non-loopback and non-HTTP frame destinations", () => {
   ]) {
     assert.throws(
       () => decodeVideoPlaybackConfig(enabledConfig({ pageUrl })),
-      /loopback|valid absolute URL/,
+      /source profile|valid absolute URL|must use HTTP/,
       pageUrl,
     );
   }

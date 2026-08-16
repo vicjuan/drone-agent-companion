@@ -44,6 +44,8 @@ sealed interface CommissioningExposureCandidate {
 object ConsoleExposurePolicy {
     private const val IPV4_LOOPBACK = "127.0.0.1"
     private const val COMMISSIONING_HTTP_PORT = 8080
+    private const val OFFICE_G520_IPV4 = "10.52.0.2"
+    private const val OFFICE_OPERATOR_IPV4 = "10.52.0.1"
 
     /**
      * Selects the development surface. Both the listener and browser origin are fixed to IPv4
@@ -104,6 +106,22 @@ object ConsoleExposurePolicy {
         )
     }
 
+    /**
+     * Frozen office-MVP listener used by the G520 DJI flavor.
+     *
+     * This deliberately cannot accept caller-selected addresses: it binds only the G520 host of
+     * the isolated `10.52.0.0/30` link and Ktor independently rejects every peer except the
+     * Windows host. Binding fails when that address is absent. A later production profile must
+     * replace this bounded demo rail with Android Network identity pinning and live inventory.
+     */
+    fun officeMvpPointToPoint(): ConsoleExposure =
+        ActiveCommissioningExposure(
+            bindHost = OFFICE_G520_IPV4,
+            allowedBrowserOrigin = httpOrigin(OFFICE_G520_IPV4, COMMISSIONING_HTTP_PORT),
+            expectedRemotePeerIpv4 = OFFICE_OPERATOR_IPV4,
+            runtimeNetworkId = "office-mvp-ethernet",
+        )
+
     /** Shared or routable production exposure remains unavailable until authentication and TLS exist. */
     fun sharedRoutableProduction(): ConsoleExposure =
         throw UnsupportedOperationException(
@@ -117,7 +135,8 @@ object ConsoleExposurePolicy {
         when (exposure.profile) {
             ConsoleExposureProfile.LOCALHOST_DEVELOPMENT ->
                 remoteAddress == "localhost" || isCanonicalIpv4Loopback(remoteAddress)
-            ConsoleExposureProfile.POINT_TO_POINT_COMMISSIONING -> false
+            ConsoleExposureProfile.POINT_TO_POINT_COMMISSIONING ->
+                remoteAddress == exposure.expectedRemotePeerIpv4
             ConsoleExposureProfile.SHARED_ROUTABLE_PRODUCTION -> false
         }
 
@@ -137,6 +156,17 @@ object ConsoleExposurePolicy {
         override val expectedRemotePeerIpv4: String,
         override val runtimeNetworkId: String,
     ) : CommissioningExposureCandidate {
+        override val profile: ConsoleExposureProfile =
+            ConsoleExposureProfile.POINT_TO_POINT_COMMISSIONING
+        override val bindPort: Int = COMMISSIONING_HTTP_PORT
+    }
+
+    private class ActiveCommissioningExposure(
+        override val bindHost: String,
+        override val allowedBrowserOrigin: String,
+        override val expectedRemotePeerIpv4: String,
+        override val runtimeNetworkId: String,
+    ) : ConsoleExposure {
         override val profile: ConsoleExposureProfile =
             ConsoleExposureProfile.POINT_TO_POINT_COMMISSIONING
         override val bindPort: Int = COMMISSIONING_HTTP_PORT

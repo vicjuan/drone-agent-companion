@@ -1,0 +1,58 @@
+# MediaMTX v1.19.1 office-MVP receiver on the Windows side of 10.52.0.0/30.
+# G520 publishes DJI MSDK RTMP to rtmp://10.52.0.1:1935/dji-main and the
+# browser embedded by http://10.52.0.2:8080 reads WHEP from port 8891.
+
+logLevel: info
+logDestinations: [stdout]
+logStructured: false
+
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: [10.52.0.2]
+    permissions:
+      - action: publish
+        path: dji-main
+  - user: any
+    pass:
+    ips: [10.52.0.1]
+    permissions:
+      - action: read
+        path: dji-main
+
+api: false
+metrics: false
+pprof: false
+playback: false
+rtsp: false
+
+rtmp: true
+rtmpEncryption: "no"
+rtmpAddress: 10.52.0.1:1935
+rtmpTrustedProxies: []
+
+hls: false
+
+webrtc: true
+webrtcAddress: 10.52.0.1:8891
+webrtcEncryption: false
+# The WHEP fetch is made by the Console page served from G520, not by a page
+# hosted on MediaMTX itself. Keep this exact; do not widen to `*`.
+webrtcAllowOrigins: ["http://10.52.0.2:8080"]
+webrtcTrustedProxies: []
+webrtcLocalUDPAddress: 10.52.0.1:8190
+webrtcLocalTCPAddress: ""
+webrtcIPsFromInterfaces: false
+webrtcIPsFromInterfacesList: []
+webrtcAdditionalHosts: [10.52.0.1]
+webrtcICEServers2: []
+
+srt: false
+moq: false
+
+paths:
+  dji-main:
+    source: publisher
+    overridePublisher: false
+    record: false

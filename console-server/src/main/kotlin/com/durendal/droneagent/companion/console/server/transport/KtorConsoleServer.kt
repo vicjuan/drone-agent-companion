@@ -44,21 +44,26 @@ import kotlinx.coroutines.launch
 data class ConsoleMediaPlaybackConfig(
     val origin: String,
     val streamId: String,
+    val source: ConsoleMediaSourceKind = ConsoleMediaSourceKind.SYNTHETIC_MAC,
 ) {
     init {
-        requireCanonicalMediaOrigin(origin)
+        requireCanonicalMediaOrigin(origin, source)
         require(CANONICAL_STREAM_ID.matches(streamId)) {
             "streamId must be one canonical MediaMTX path segment"
         }
     }
 
-    val sourceKind: String = SOURCE_KIND
+    val sourceKind: String = source.wireName
     val pageUrl: String = "$origin/$streamId"
 
     companion object {
-        const val SOURCE_KIND: String = "synthetic_mac"
         private val CANONICAL_STREAM_ID = Regex("^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
     }
+}
+
+enum class ConsoleMediaSourceKind(val wireName: String) {
+    SYNTHETIC_MAC("synthetic_mac"),
+    DJI_MSDK("dji_msdk"),
 }
 
 sealed interface ConsoleServerConfig {
@@ -586,13 +591,21 @@ private fun requireCanonicalBrowserOrigin(origin: String) {
     }
 }
 
-private fun requireCanonicalMediaOrigin(origin: String) {
+private fun requireCanonicalMediaOrigin(
+    origin: String,
+    source: ConsoleMediaSourceKind,
+) {
     val uri =
         runCatching { URI(origin) }
             .getOrElse { throw IllegalArgumentException("media origin must be a URI", it) }
     require(uri.scheme == "http") { "media origin must use http" }
-    require(uri.host == "127.0.0.1") {
-        "media origin must use the canonical IPv4 loopback host"
+    val expectedHost =
+        when (source) {
+            ConsoleMediaSourceKind.SYNTHETIC_MAC -> "127.0.0.1"
+            ConsoleMediaSourceKind.DJI_MSDK -> "10.52.0.1"
+        }
+    require(uri.host == expectedHost) {
+        "media origin must use the source profile's exact IPv4 host"
     }
     require(uri.rawUserInfo == null) { "media origin must not contain credentials" }
     require(uri.rawPath.isNullOrEmpty() && uri.rawQuery == null && uri.rawFragment == null) {
@@ -600,6 +613,9 @@ private fun requireCanonicalMediaOrigin(origin: String) {
     }
     val effectivePort = effectivePort(uri)
     require(effectivePort in 1..65_535) { "media origin port is invalid" }
+    if (source == ConsoleMediaSourceKind.DJI_MSDK) {
+        require(effectivePort == 8891) { "DJI office media origin must use port 8891" }
+    }
     require(origin == browserOrigin(uri.scheme, checkNotNull(uri.host), effectivePort)) {
         "media origin must use canonical origin syntax"
     }

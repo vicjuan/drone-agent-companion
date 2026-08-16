@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- The production candidate has one cleartext surface: the isolated
+         10.52.0.0/30 commissioning link. Shared/routable exposure stays denied. -->
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">10.52.0.1</domain>
+        <domain includeSubdomains="false">10.52.0.2</domain>
+    </domain-config>
+</network-security-config>

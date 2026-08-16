@@ -51,13 +51,15 @@ val androidSdkAvailable =
     sharedAndroidSdkEnvironment || (companionHasLocalSdk && vendorHasLocalSdk)
 
 if (androidSdkAvailable) {
+    include(":console-adapter-dji")
     include(":vision-opencv-android")
     include(":host-headless")
 } else {
     gradle.rootProject {
         logger.warn(
             "[drone-agent-companion] Android SDK not shared with both builds. " +
-                "Android modules (:vision-opencv-android, :host-headless) are EXCLUDED; " +
+                "Android modules (:console-adapter-dji, :vision-opencv-android, " +
+                ":host-headless) are EXCLUDED; " +
                 "building the pure-JVM workspace only.",
         )
     }

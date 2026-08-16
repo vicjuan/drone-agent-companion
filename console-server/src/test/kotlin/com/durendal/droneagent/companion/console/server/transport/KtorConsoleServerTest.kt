@@ -224,8 +224,35 @@ class KtorConsoleServerTest {
             "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; " +
                 "frame-src http://127.0.0.1:8889; form-action 'none'; script-src 'self'; " +
                 "style-src 'self'; img-src 'self'; font-src 'self'; " +
-                "connect-src 'self' ws://127.0.0.1:0",
+                "connect-src 'self' ws://127.0.0.1:8080",
             response.headers["Content-Security-Policy"],
+        )
+    }
+
+    @Test
+    fun `DJI media route is fixed to the Windows point to point WHEP endpoint`() = testApplication {
+        val media =
+            ConsoleMediaPlaybackConfig(
+                origin = "http://10.52.0.1:8891",
+                streamId = "dji-main",
+                source = ConsoleMediaSourceKind.DJI_MSDK,
+            )
+        application {
+            installConsoleApplication(
+                config(Files.createTempDirectory("console-media-dji"), media),
+                RecordingController(),
+            )
+        }
+
+        val response = client.get(ConsoleRoutes.MEDIA)
+        assertEquals(
+            "{\"sourceKind\":\"dji_msdk\",\"streamId\":\"dji-main\"," +
+                "\"pageUrl\":\"http://10.52.0.1:8891/dji-main\"}",
+            response.bodyAsText(),
+        )
+        assertTrue(
+            checkNotNull(response.headers["Content-Security-Policy"])
+                .contains("frame-src http://10.52.0.1:8891"),
         )
     }
 

@@ -1,3 +1,6 @@
+import java.io.File
+import java.security.MessageDigest
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -24,6 +27,12 @@ val candidateWorktreeState =
 val generatedCandidateAssets = layout.buildDirectory.dir("generated/candidateAssets")
 val generatedCandidateIdentityDirectory =
     generatedCandidateAssets.map { it.dir("companion-candidate") }
+val djiApiKey = providers.gradleProperty("djiApiKey").orElse("")
+val djiApplicationId =
+    providers.gradleProperty("djiApplicationId")
+        .orElse("com.durendal.droneagent.companion.host")
+val dji518Arm64LibcxxSha256 =
+    "b17919df195f29b0a238468c04171b93cedcdffbe0d30cdc634327cf7f7889bc"
 
 fun gitOutput(vararg arguments: String): String {
     val process =
@@ -36,6 +45,19 @@ fun gitOutput(vararg arguments: String): String {
         "git ${arguments.joinToString(" ")} failed: $output"
     }
     return output
+}
+
+fun File.sha256Hex(): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    inputStream().use { input ->
+        val buffer = ByteArray(16 * 1024)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            if (count > 0) digest.update(buffer, 0, count)
+        }
+    }
+    return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
 }
 
 android {
@@ -59,6 +81,14 @@ android {
 
     flavorDimensions += "adapter"
     productFlavors {
+        create("dji") {
+            dimension = "adapter"
+            // DJI Developer keys are bound to the Android application ID. Keep the new companion
+            // package as the safe default, but allow an operator to build against an existing
+            // registered DJI package only through an explicit, non-committed Gradle property.
+            applicationId = djiApplicationId.get()
+            manifestPlaceholders["djiApiKey"] = djiApiKey.get()
+        }
         create("mock") {
             dimension = "adapter"
             applicationIdSuffix = ".mock"
@@ -95,6 +125,13 @@ android {
                 "META-INF/LICENSE*",
                 "META-INF/NOTICE*",
             )
+        // DJI aircraft/wpmz SDKs and the official OpenCV Android AAR each package the same
+        // C++ runtime. Match DJI's release app packaging so arm64 extraction and merge are
+        // deterministic on G520 rather than failing duplicate-native-library assembly.
+        jniLibs {
+            useLegacyPackaging = true
+            pickFirsts += listOf("lib/arm64-v8a/libc++_shared.so")
+        }
     }
 }
 
@@ -143,6 +180,25 @@ val generateCandidateIdentity by tasks.registering {
     }
 }
 
+val verifyDjiArm64NativeRuntime by tasks.registering {
+    group = "verification"
+    description = "Proves the merged arm64 C++ runtime is the DJI 5.18.0 copy, not OpenCV's older copy."
+    dependsOn("mergeDjiDebugNativeLibs")
+    val mergedRuntime =
+        layout.buildDirectory.file(
+            "intermediates/merged_native_libs/djiDebug/mergeDjiDebugNativeLibs/" +
+                "out/lib/arm64-v8a/libc++_shared.so",
+        )
+    inputs.file(mergedRuntime)
+    doLast {
+        val runtime = mergedRuntime.get().asFile
+        require(runtime.isFile) { "merged DJI arm64 libc++_shared.so is missing" }
+        require(runtime.sha256Hex() == dji518Arm64LibcxxSha256) {
+            "merged arm64 libc++_shared.so is not the frozen DJI 5.18.0 runtime"
+        }
+    }
+}
+
 tasks.named("preBuild") {
     dependsOn(packageCompanionWebAssets)
     dependsOn(generateCandidateIdentity)
@@ -151,7 +207,7 @@ tasks.named("preBuild") {
 // Full APK assembly is an expensive frozen-candidate lane. Recheck after packaging so ordinary
 // stale/dirty builds cannot be presented as evidence merely because an earlier marker survived.
 // This is a trusted-operator procedural guard, not an adversarial concurrent-build attestation.
-tasks.matching { it.name == "assembleMockDebug" }.configureEach {
+tasks.matching { it.name == "assembleMockDebug" || it.name == "assembleDjiDebug" }.configureEach {
     doLast {
         val freshCommit = gitOutput("rev-parse", "--verify", "HEAD^{commit}").trim()
         val freshStatus =
@@ -183,12 +239,19 @@ tasks.matching { it.name == "assembleMockDebug" }.configureEach {
     }
 }
 
+tasks.matching { it.name == "assembleDjiDebug" }.configureEach {
+    dependsOn(verifyDjiArm64NativeRuntime)
+}
+
 dependencies {
     coreLibraryDesugaring(libs.desugar.jdk.libs)
 
     implementation(project(":vision-opencv-android"))
     // Observation-only decoded frames and LiveVisionBridge. This surface cannot name DJI control.
     implementation("com.durendal.droneagent:drone-observation:local")
+    "djiImplementation"(project(":commissioning-network"))
+    "djiImplementation"(project(":console-adapter-dji"))
+    "djiImplementation"("com.durendal.droneagent:adapter-dji:local")
     "mockImplementation"(project(":console-adapter-mock"))
 
     testImplementation(libs.junit)
