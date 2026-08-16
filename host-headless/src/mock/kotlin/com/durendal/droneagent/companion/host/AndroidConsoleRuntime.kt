@@ -61,6 +61,8 @@ data class AndroidConsoleRuntimeConfig(
  * G520 commissioning composition, and none of its successes may promote the hardware capability
  * matrix. Hardware process-loss safety also requires a first-hand aircraft-side failsafe test;
  * an in-process foreground service cannot neutralize after its own process has died.
+ * [completeStartup] publishes MOCK_READY only for this explicitly mock-only profile; the generic
+ * host startup contract never grants hardware commissioning authority.
  */
 class AndroidConsoleRuntime(
     private val config: AndroidConsoleRuntimeConfig,
@@ -70,7 +72,7 @@ class AndroidConsoleRuntime(
 ) : HeadlessRuntime {
     private val lifecycleLock = Any()
     private val stopRequested = AtomicBoolean(false)
-    private val startupReady = AtomicBoolean(false)
+    private val mockReady = AtomicBoolean(false)
     private var state = State.NEW
     @Volatile private var startingComponents: Components? = null
     @Volatile private var components: Components? = null
@@ -78,7 +80,7 @@ class AndroidConsoleRuntime(
 
     override fun requestStop() {
         stopRequested.set(true)
-        startupReady.set(false)
+        mockReady.set(false)
         startingComponents?.closeActuationAdmission()
         components?.closeActuationAdmission()
     }
@@ -106,35 +108,35 @@ class AndroidConsoleRuntime(
         startingComponents = created
         try {
             runStartupPhase(StartupPhase.LISTENERS) {
-                ensureStartupAdmitted(created)
+                ensureStartupMayContinue(created)
                 created.installListeners()
             }
             runStartupPhase(StartupPhase.AGENT_CONNECT) {
-                ensureStartupAdmitted(created)
+                ensureStartupMayContinue(created)
                 created.agent.connection.connect()
             }
             runStartupPhase(StartupPhase.LOCKED_RUNTIME_STATE) {
-                ensureStartupAdmitted(created)
+                ensureStartupMayContinue(created)
                 created.publishRuntimeState()
             }
             runStartupPhase(StartupPhase.CONNECTOR) {
-                ensureStartupAdmitted(created)
+                ensureStartupMayContinue(created)
                 created.server.start(wait = false)
             }
             // Keep periodic telemetry stopped while the one-time canonical matrix parse warms.
             // A browser may already load the SPA/health endpoint, but HANDSHAKING cannot overflow
             // its bounded broadcast queue before this cold path finishes.
             runStartupPhase(StartupPhase.CAPABILITY_PREWARM) {
-                ensureStartupAdmitted(created)
+                ensureStartupMayContinue(created)
                 created.prewarmCapabilitySnapshot()
             }
-            runStartupPhase(StartupPhase.ADMISSION_PENDING) {
-                ensureStartupAdmitted(created)
+            runStartupPhase(StartupPhase.STARTUP_PENDING) {
+                ensureStartupMayContinue(created)
                 synchronized(lifecycleLock) {
                     check(!stopRequested.get()) { "headless runtime startup was cancelled" }
                     components = created
                     startingComponents = null
-                    state = State.ADMISSION_PENDING
+                    state = State.STARTUP_PENDING
                 }
             }
         } catch (failure: Throwable) {
@@ -156,35 +158,37 @@ class AndroidConsoleRuntime(
         }
     }
 
-    override fun admitActuation() {
-        val admitting =
+    override fun completeStartup() {
+        val completing =
             synchronized(lifecycleLock) {
-                check(state == State.ADMISSION_PENDING) {
-                    "headless console runtime is not awaiting actuation admission"
+                check(state == State.STARTUP_PENDING) {
+                    "headless console runtime is not awaiting startup completion"
                 }
-                check(!stopRequested.get()) { "headless runtime admission was cancelled" }
-                state = State.ADMITTING
+                check(!stopRequested.get()) { "headless runtime startup completion was cancelled" }
+                state = State.COMPLETING_STARTUP
                 checkNotNull(components) { "headless console components are unavailable" }
             }
 
         try {
-            ensureStartupAdmitted(admitting)
-            startupReady.set(true)
-            ensureStartupAdmitted(admitting)
-            admitting.publishRuntimeState()
-            ensureStartupAdmitted(admitting)
-            admitting.agent.telemetry.start()
-            ensureStartupAdmitted(admitting)
+            ensureStartupMayContinue(completing)
+            // This readiness publication is confined to the localhost adapter-mock composition.
+            // It is not a commissioning decision and must never be copied into a DJI runtime.
+            mockReady.set(true)
+            ensureStartupMayContinue(completing)
+            completing.publishRuntimeState()
+            ensureStartupMayContinue(completing)
+            completing.agent.telemetry.start()
+            ensureStartupMayContinue(completing)
             synchronized(lifecycleLock) {
-                check(!stopRequested.get()) { "headless runtime admission was cancelled" }
+                check(!stopRequested.get()) { "headless runtime startup completion was cancelled" }
                 state = State.RUNNING
             }
         } catch (failure: Throwable) {
-            reportStartupFailure(StartupPhase.ACTUATION_ADMISSION)
-            startupReady.set(false)
-            admitting.closeActuationAdmission()
+            reportStartupFailure(StartupPhase.MOCK_READY)
+            mockReady.set(false)
+            completing.closeActuationAdmission()
             synchronized(lifecycleLock) {
-                if (state == State.ADMITTING) state = State.ADMISSION_PENDING
+                if (state == State.COMPLETING_STARTUP) state = State.STARTUP_PENDING
             }
             throw failure
         }
@@ -202,8 +206,8 @@ class AndroidConsoleRuntime(
                         return RuntimeCloseResult.CLOSED
                     }
                     State.STARTING -> return RuntimeCloseResult.FAILED
-                    State.ADMISSION_PENDING,
-                    State.ADMITTING,
+                    State.STARTUP_PENDING,
+                    State.COMPLETING_STARTUP,
                     State.RUNNING -> {
                         state = State.CLOSING
                         components.also { components = null }
@@ -236,10 +240,10 @@ class AndroidConsoleRuntime(
         val returnToHome = ObservableMockReturnToHomePort()
         val executor = MockConsoleCommandExecutor(agent, monotonicClock, returnToHome)
         val snapshots = MockConsoleSnapshotProvider(agent, returnToHome)
-        val admittedSnapshots =
-            StartupGatedConsoleSnapshotProvider(
+        val mockReadySnapshots =
+            MockReadyGatedConsoleSnapshotProvider(
                 delegate = snapshots,
-                startupReady = startupReady,
+                mockReady = mockReady,
                 stopRequested = stopRequested,
             )
         val scheduler = JdkConsoleDeadlineScheduler(monotonicClock)
@@ -267,7 +271,7 @@ class AndroidConsoleRuntime(
                     coreProvider = {
                         checkNotNull(coreReference.get()) { "console core not attached" }
                     },
-                    snapshots = admittedSnapshots,
+                    snapshots = mockReadySnapshots,
                     serverVersion = SERVER_VERSION,
                     emitPayload = { target, payload ->
                         controllerReference.get()?.emit(target, payload) ?: false
@@ -311,11 +315,11 @@ class AndroidConsoleRuntime(
                 }
             lateinit var publishRuntimeState: () -> Unit
             publishRuntimeState = {
-                val admittedRuntimeState = admittedSnapshots.runtimeState()
+                val mockRuntimeState = mockReadySnapshots.runtimeState()
                 // Update the server-owned gate before publishing browser-visible state. A raw
                 // socket client therefore cannot dispatch through an unlocked UI snapshot alone.
-                core.updateActuationReadiness(admittedRuntimeState.toActuationReadiness())
-                protocol.publishRuntimeState(admittedRuntimeState)
+                core.updateActuationReadiness(mockRuntimeState.toActuationReadiness())
+                protocol.publishRuntimeState(mockRuntimeState)
             }
             val connectionListener = ConnectionListener { publishRuntimeState() }
             val actuationListener = FlightControlPortSnapshotListener { publishRuntimeState() }
@@ -358,7 +362,7 @@ class AndroidConsoleRuntime(
         }
     }
 
-    private fun ensureStartupAdmitted(created: Components) {
+    private fun ensureStartupMayContinue(created: Components) {
         if (stopRequested.get()) {
             created.closeActuationAdmission()
             throw IllegalStateException("headless runtime startup was cancelled")
@@ -389,15 +393,15 @@ class AndroidConsoleRuntime(
         LOCKED_RUNTIME_STATE("locked_runtime_state"),
         CONNECTOR("connector"),
         CAPABILITY_PREWARM("capability_prewarm"),
-        ADMISSION_PENDING("admission_pending"),
-        ACTUATION_ADMISSION("actuation_admission"),
+        STARTUP_PENDING("startup_pending"),
+        MOCK_READY("mock_ready"),
     }
 
     private enum class State {
         NEW,
         STARTING,
-        ADMISSION_PENDING,
-        ADMITTING,
+        STARTUP_PENDING,
+        COMPLETING_STARTUP,
         RUNNING,
         CLOSING,
         CLOSE_INCOMPLETE,
@@ -477,14 +481,14 @@ class AndroidConsoleRuntime(
     }
 }
 
-internal class StartupGatedConsoleSnapshotProvider(
+internal class MockReadyGatedConsoleSnapshotProvider(
     private val delegate: ConsoleSnapshotProvider,
-    private val startupReady: AtomicBoolean,
+    private val mockReady: AtomicBoolean,
     private val stopRequested: AtomicBoolean,
 ) : ConsoleSnapshotProvider by delegate {
     override fun runtimeState() =
         delegate.runtimeState().let { runtimeState ->
-            if (stopRequested.get() || !startupReady.get()) {
+            if (stopRequested.get() || !mockReady.get()) {
                 runtimeState.copy(actuationLock = ActuationLockState.LOCKED)
             } else {
                 runtimeState

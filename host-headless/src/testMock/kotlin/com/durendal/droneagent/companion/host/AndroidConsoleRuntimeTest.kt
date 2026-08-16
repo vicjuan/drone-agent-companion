@@ -46,14 +46,17 @@ class AndroidConsoleRuntimeTest {
             assertTrue(lockedAudit.contains("mock:connected:locked:localhost_development"))
             assertFalse(lockedAudit.contains("mock:connected:unlocked:localhost_development"))
 
-            runtime.admitActuation()
-            assertTrue("admission must start periodic telemetry", awaitTelemetry(agent))
+            runtime.completeStartup()
+            assertTrue(
+                "mock startup completion must start periodic telemetry",
+                awaitTelemetry(agent),
+            )
             assertTrue(
                 auditFile.readText().contains("mock:connected:unlocked:localhost_development"),
             )
             assertTrue(
-                "actuation admission must be single use",
-                runCatching(runtime::admitActuation).isFailure,
+                "startup completion must be single use",
+                runCatching(runtime::completeStartup).isFailure,
             )
         } finally {
             runtime.requestStop()
@@ -66,10 +69,10 @@ class AndroidConsoleRuntimeTest {
     }
 
     @Test
-    fun `stop before actuation admission rejects the late admission`() {
-        val webRoot = temporaryFolder.newFolder("admission-web")
+    fun `stop before startup completion rejects late completion`() {
+        val webRoot = temporaryFolder.newFolder("startup-web")
         File(webRoot, "index.html").writeText("<html>headless</html>")
-        val auditFile = temporaryFolder.root.resolve("admission/audit.jsonl")
+        val auditFile = temporaryFolder.root.resolve("startup/audit.jsonl")
         val runtime =
             AndroidConsoleRuntime(
                 AndroidConsoleRuntimeConfig(
@@ -81,7 +84,7 @@ class AndroidConsoleRuntimeTest {
 
         runtime.start()
         runtime.requestStop()
-        assertTrue(runCatching(runtime::admitActuation).isFailure)
+        assertTrue(runCatching(runtime::completeStartup).isFailure)
         assertFalse(
             auditFile.readText().contains("mock:connected:unlocked:localhost_development"),
         )
@@ -144,14 +147,14 @@ class AndroidConsoleRuntimeTest {
     }
 
     @Test
-    fun `browser runtime snapshot remains locked until startup and after terminal stop`() {
+    fun `browser runtime snapshot remains locked until mock ready and after terminal stop`() {
         val agent = MockDroneAgent()
-        val startupReady = AtomicBoolean(false)
+        val mockReady = AtomicBoolean(false)
         val stopRequested = AtomicBoolean(false)
         val snapshots =
-            StartupGatedConsoleSnapshotProvider(
+            MockReadyGatedConsoleSnapshotProvider(
                 delegate = MockConsoleSnapshotProvider(agent, ObservableMockReturnToHomePort()),
-                startupReady = startupReady,
+                mockReady = mockReady,
                 stopRequested = stopRequested,
             )
         try {
@@ -159,7 +162,7 @@ class AndroidConsoleRuntimeTest {
 
             assertEquals(ActuationLockState.LOCKED, snapshots.runtimeState().actuationLock)
 
-            startupReady.set(true)
+            mockReady.set(true)
             assertEquals(ActuationLockState.UNLOCKED, snapshots.runtimeState().actuationLock)
 
             stopRequested.set(true)

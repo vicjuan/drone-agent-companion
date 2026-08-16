@@ -25,7 +25,7 @@ class HeadlessRuntimeControllerTest {
         val runtime =
             FakeRuntime(
                 onStart = { order += "runtime-start" },
-                onAdmitActuation = { order += "runtime-admit" },
+                onCompleteStartup = { order += "runtime-complete-startup" },
                 onClose = {
                     order += "runtime-close"
                     RuntimeCloseResult.CLOSED
@@ -45,7 +45,7 @@ class HeadlessRuntimeControllerTest {
         assertEquals(RuntimeCloseResult.CLOSED, controller.closeWithin(500L))
         assertFalse(controller.isRunning())
         assertEquals(1, runtime.startCalls)
-        assertEquals(1, runtime.admitActuationCalls)
+        assertEquals(1, runtime.completeStartupCalls)
         assertEquals(1, runtime.closeCalls)
         assertTrue(
             order.indexOf("runtime-start") <
@@ -53,10 +53,33 @@ class HeadlessRuntimeControllerTest {
         )
         assertTrue(
             order.indexOf("evidence-runtime_admission_committed") <
-                order.indexOf("runtime-admit"),
+                order.indexOf("runtime-complete-startup"),
         )
-        assertTrue(order.indexOf("runtime-admit") < order.indexOf("evidence-runtime_started"))
+        assertTrue(
+            order.indexOf("runtime-complete-startup") < order.indexOf("evidence-runtime_started"),
+        )
         assertTrue(order.indexOf("runtime-close") < order.indexOf("evidence-runtime_closed"))
+    }
+
+    @Test
+    fun `controller startup cannot infer DJI authorization from connected readiness`() {
+        val runtime = FakeDjiRuntime()
+        val controller =
+            HeadlessRuntimeController(
+                HeadlessRuntimeFactory { runtime },
+                RecordingEvidence(mutableListOf()),
+            )
+
+        assertEquals(RuntimeStartResult.STARTED, controller.start(LifecycleTrigger.BOOT_COMPLETED))
+
+        assertTrue(runtime.listenersStarted)
+        assertTrue(runtime.aircraftConnected)
+        assertTrue(runtime.networkReady)
+        assertTrue(runtime.telemetryStarted)
+        assertEquals(1, runtime.completeStartupCalls)
+        assertEquals(0, runtime.commissioningApiCalls)
+        assertFalse(runtime.actuationAuthorized)
+        assertEquals(RuntimeCloseResult.CLOSED, controller.closeWithin(100L))
     }
 
     @Test
@@ -179,7 +202,7 @@ class HeadlessRuntimeControllerTest {
 
         assertEquals(RuntimeStartResult.CANCELLED, result.get())
         assertEquals(0, runtime.startCalls)
-        assertEquals(0, runtime.admitActuationCalls)
+        assertEquals(0, runtime.completeStartupCalls)
         assertEquals(1, runtime.requestStopCalls)
         assertEquals(1, runtime.closeCalls)
         assertFalse(controller.isRunning())
@@ -190,15 +213,15 @@ class HeadlessRuntimeControllerTest {
         val runtimeEntered = CountDownLatch(1)
         val releaseRuntime = CountDownLatch(1)
         val order = mutableListOf<String>()
-        val commandAdmissionOpen = java.util.concurrent.atomic.AtomicBoolean(false)
+        val startupPublicationVisible = java.util.concurrent.atomic.AtomicBoolean(false)
         val runtime =
             FakeRuntime(
                 onStart = {
-                    commandAdmissionOpen.set(true)
+                    startupPublicationVisible.set(true)
                     runtimeEntered.countDown()
                     assertTrue(releaseRuntime.await(2, TimeUnit.SECONDS))
                 },
-                onRequestStop = { commandAdmissionOpen.set(false) },
+                onRequestStop = { startupPublicationVisible.set(false) },
             )
         val controller =
             HeadlessRuntimeController(
@@ -215,15 +238,15 @@ class HeadlessRuntimeControllerTest {
         assertTrue(runtimeEntered.await(2, TimeUnit.SECONDS))
         controller.requestStop()
         assertFalse(
-            "safe-stop callback must close command admission before startup returns",
-            commandAdmissionOpen.get(),
+            "safe-stop callback must revoke partial startup publication before start returns",
+            startupPublicationVisible.get(),
         )
         releaseRuntime.countDown()
         startThread.join(2_000L)
 
         assertEquals(RuntimeStartResult.CANCELLED, result.get())
         assertEquals(1, runtime.startCalls)
-        assertEquals(0, runtime.admitActuationCalls)
+        assertEquals(0, runtime.completeStartupCalls)
         assertEquals(2, runtime.requestStopCalls)
         assertEquals(1, runtime.closeCalls)
         assertFalse(controller.isRunning())
@@ -252,9 +275,9 @@ class HeadlessRuntimeControllerTest {
     }
 
     @Test
-    fun `durable admission commit precedes runtime admission`() {
+    fun `durable startup commit precedes runtime completion`() {
         val order = mutableListOf<String>()
-        val runtime = FakeRuntime(onAdmitActuation = { order += "runtime-admit" })
+        val runtime = FakeRuntime(onCompleteStartup = { order += "runtime-complete-startup" })
         val controller =
             HeadlessRuntimeController(
                 HeadlessRuntimeFactory { runtime },
@@ -265,13 +288,15 @@ class HeadlessRuntimeControllerTest {
 
         assertTrue(
             order.indexOf("evidence-runtime_admission_committed") <
-                order.indexOf("runtime-admit"),
+                order.indexOf("runtime-complete-startup"),
         )
-        assertTrue(order.indexOf("runtime-admit") < order.indexOf("evidence-runtime_started"))
+        assertTrue(
+            order.indexOf("runtime-complete-startup") < order.indexOf("evidence-runtime_started"),
+        )
     }
 
     @Test
-    fun `failed admission commit closes without admitting or recording started`() {
+    fun `failed startup commit closes without completing or recording started`() {
         val order = mutableListOf<String>()
         var rejectCommit = true
         val evidence =
@@ -289,7 +314,7 @@ class HeadlessRuntimeControllerTest {
 
         assertEquals(RuntimeStartResult.FAILED, controller.start(LifecycleTrigger.EXPLICIT_START))
 
-        assertEquals(0, runtime.admitActuationCalls)
+        assertEquals(0, runtime.completeStartupCalls)
         assertEquals(1, runtime.requestStopCalls)
         assertEquals(1, runtime.closeCalls)
         assertFalse(controller.isRunning())
@@ -298,11 +323,11 @@ class HeadlessRuntimeControllerTest {
     }
 
     @Test
-    fun `admission failure closes after durable commit without recording started`() {
+    fun `startup completion failure closes after durable commit without recording started`() {
         val order = mutableListOf<String>()
         val runtime =
             FakeRuntime(
-                onAdmitActuation = { throw IllegalStateException("admission failed") },
+                onCompleteStartup = { throw IllegalStateException("startup completion failed") },
             )
         val controller =
             HeadlessRuntimeController(
@@ -312,7 +337,7 @@ class HeadlessRuntimeControllerTest {
 
         assertEquals(RuntimeStartResult.FAILED, controller.start(LifecycleTrigger.EXPLICIT_START))
 
-        assertEquals(1, runtime.admitActuationCalls)
+        assertEquals(1, runtime.completeStartupCalls)
         assertEquals(1, runtime.requestStopCalls)
         assertEquals(1, runtime.closeCalls)
         assertFalse(controller.isRunning())
@@ -322,7 +347,7 @@ class HeadlessRuntimeControllerTest {
     }
 
     @Test
-    fun `safe stop racing durable admission commit prevents runtime admission`() {
+    fun `safe stop racing durable startup commit prevents runtime completion`() {
         val commitEntered = CountDownLatch(1)
         val releaseCommit = CountDownLatch(1)
         val order = mutableListOf<String>()
@@ -351,7 +376,7 @@ class HeadlessRuntimeControllerTest {
         startThread.join(2_000L)
 
         assertEquals(RuntimeStartResult.CANCELLED, result.get())
-        assertEquals(0, runtime.admitActuationCalls)
+        assertEquals(0, runtime.completeStartupCalls)
         assertEquals(2, runtime.requestStopCalls)
         assertEquals(1, runtime.closeCalls)
         assertFalse(controller.isRunning())
@@ -360,15 +385,15 @@ class HeadlessRuntimeControllerTest {
     }
 
     @Test
-    fun `safe stop racing admission closes and never records started`() {
-        val admissionEntered = CountDownLatch(1)
-        val releaseAdmission = CountDownLatch(1)
+    fun `safe stop racing startup completion closes and never records started`() {
+        val completionEntered = CountDownLatch(1)
+        val releaseCompletion = CountDownLatch(1)
         val order = mutableListOf<String>()
         val runtime =
             FakeRuntime(
-                onAdmitActuation = {
-                    admissionEntered.countDown()
-                    assertTrue(releaseAdmission.await(2, TimeUnit.SECONDS))
+                onCompleteStartup = {
+                    completionEntered.countDown()
+                    assertTrue(releaseCompletion.await(2, TimeUnit.SECONDS))
                 },
             )
         val controller =
@@ -383,13 +408,13 @@ class HeadlessRuntimeControllerTest {
             }
 
         startThread.start()
-        assertTrue(admissionEntered.await(2, TimeUnit.SECONDS))
+        assertTrue(completionEntered.await(2, TimeUnit.SECONDS))
         controller.requestStop()
-        releaseAdmission.countDown()
+        releaseCompletion.countDown()
         startThread.join(2_000L)
 
         assertEquals(RuntimeStartResult.CANCELLED, result.get())
-        assertEquals(1, runtime.admitActuationCalls)
+        assertEquals(1, runtime.completeStartupCalls)
         assertEquals(2, runtime.requestStopCalls)
         assertEquals(1, runtime.closeCalls)
         assertFalse(controller.isRunning())
@@ -407,12 +432,12 @@ class HeadlessRuntimeControllerTest {
 
     private class FakeRuntime(
         private val onStart: () -> Unit = {},
-        private val onAdmitActuation: () -> Unit = {},
+        private val onCompleteStartup: () -> Unit = {},
         private val onRequestStop: () -> Unit = {},
         private val onClose: () -> RuntimeCloseResult = { RuntimeCloseResult.CLOSED },
     ) : HeadlessRuntime {
         var startCalls = 0
-        var admitActuationCalls = 0
+        var completeStartupCalls = 0
         var requestStopCalls = 0
         var closeCalls = 0
 
@@ -426,14 +451,46 @@ class HeadlessRuntimeControllerTest {
             onStart()
         }
 
-        override fun admitActuation() {
-            admitActuationCalls++
-            onAdmitActuation()
+        override fun completeStartup() {
+            completeStartupCalls++
+            onCompleteStartup()
         }
 
         override fun closeWithin(timeoutMillis: Long): RuntimeCloseResult {
             closeCalls++
             return onClose()
         }
+    }
+
+    private class FakeDjiRuntime : HeadlessRuntime {
+        var listenersStarted = false
+        var aircraftConnected = false
+        var networkReady = false
+        var telemetryStarted = false
+        var completeStartupCalls = 0
+        var commissioningApiCalls = 0
+        var actuationAuthorized = false
+
+        override fun requestStop() = Unit
+
+        override fun start() {
+            listenersStarted = true
+            aircraftConnected = true
+            networkReady = true
+        }
+
+        override fun completeStartup() {
+            completeStartupCalls++
+            telemetryStarted = true
+        }
+
+        /** Intentionally outside [HeadlessRuntime]; only an explicit commissioning owner may call it. */
+        @Suppress("unused")
+        fun authorizeCommissioningCapability() {
+            commissioningApiCalls++
+            actuationAuthorized = true
+        }
+
+        override fun closeWithin(timeoutMillis: Long): RuntimeCloseResult = RuntimeCloseResult.CLOSED
     }
 }

@@ -23,6 +23,8 @@ enum class LifecycleEvent(val wireName: String) {
     RUNTIME_FACTORY_UNAVAILABLE("runtime_factory_unavailable"),
     RUNTIME_FACTORY_FAILED("runtime_factory_failed"),
     RUNTIME_FACTORY_CREATED("runtime_factory_created"),
+    // Historical wire name retained for journal compatibility. It means the controller's
+    // startup-completion rail was durably committed; it is never hardware commissioning authority.
     RUNTIME_ADMISSION_COMMITTED("runtime_admission_committed"),
     RUNTIME_STARTED("runtime_started"),
     RUNTIME_START_FAILED("runtime_start_failed"),

@@ -10,8 +10,15 @@ interface HeadlessRuntime {
     /** Starts listeners and transports while keeping actuation locked and telemetry stopped. */
     fun start()
 
-    /** Opens startup actuation readiness after its durable controller commit. This is stop-aware. */
-    fun admitActuation()
+    /**
+     * Completes the listener and telemetry startup rail after its durable controller commit.
+     *
+     * This hook is not a hardware commissioning or actuation-authorization API. A hardware
+     * runtime must keep actuation fail-closed until a separate, explicit commissioning decision
+     * authorizes specific capabilities. Localhost mock compositions may publish their own
+     * explicitly mock-only readiness from this hook. Implementations must remain stop-aware.
+     */
+    fun completeStartup()
 
     /**
      * Stops accepting work, returns actuation to neutral, and releases resources.
@@ -65,7 +72,7 @@ class HeadlessRuntimeController(
     private var pendingClosedOutcomeEvidence = false
     private val stopRequested = AtomicBoolean(false)
 
-    /** Closes startup admission without waiting behind slow factory or runtime initialization. */
+    /** Cancels startup without waiting behind slow factory or runtime initialization. */
     fun requestStop() {
         stopRequested.set(true)
         // Implementations must close their server-owned admission gate before returning. Cleanup
@@ -114,6 +121,8 @@ class HeadlessRuntimeController(
             return finishIncompleteStartup(candidate, trigger, cancelled = true)
         }
 
+        // Keep the persisted evidence wire name for journal compatibility. This commit covers
+        // only the controller-owned startup rail; it grants no hardware commissioning authority.
         try {
             evidence.record(LifecycleEvent.RUNTIME_ADMISSION_COMMITTED, trigger)
         } catch (_: Throwable) {
@@ -125,7 +134,7 @@ class HeadlessRuntimeController(
         }
 
         try {
-            candidate.admitActuation()
+            candidate.completeStartup()
         } catch (_: Throwable) {
             val cancelled = stopRequested.get()
             return finishIncompleteStartup(candidate, trigger, cancelled)
