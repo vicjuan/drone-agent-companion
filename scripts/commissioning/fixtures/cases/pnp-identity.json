@@ -1,0 +1,6 @@
+{
+  "snapshotPatch": {
+    "adapter": { "pnpDeviceIdSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }
+  },
+  "expectedIssueCodes": ["PNP_IDENTITY_MISMATCH"]
+}

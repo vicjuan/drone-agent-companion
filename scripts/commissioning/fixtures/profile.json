@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "profileId": "g520-p2p-windows-v1",
+  "status": "COMMISSIONING_CANDIDATE",
+  "operator": {
+    "adapterGuid": "11111111-2222-3333-4444-555555555555",
+    "pnpDeviceIdSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ifIndex": null,
+    "ipv4": "10.52.0.1",
+    "prefixLength": 30
+  },
+  "g520": {
+    "ipv4": "10.52.0.2"
+  },
+  "console": {
+    "port": 8080,
+    "origin": "http://10.52.0.2:8080"
+  },
+  "policy": {
+    "requireUniqueAdapter": true,
+    "requireAdapterUp": true,
+    "requireStaticIpv4": true,
+    "requireDhcpDisabled": true,
+    "requireNoGateway": true,
+    "requireNoDns": true,
+    "requireNoDefaultRoute": true,
+    "requireIcsDisabled": true,
+    "requireBridgeDisabled": true,
+    "requireIpForwardingDisabled": true
+  }
+}

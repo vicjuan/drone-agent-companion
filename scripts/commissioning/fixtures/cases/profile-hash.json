@@ -1,0 +1,6 @@
+{
+  "snapshotPatch": {
+    "collector": { "profileSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }
+  },
+  "expectedIssueCodes": ["PROFILE_SHA256_MISMATCH"]
+}

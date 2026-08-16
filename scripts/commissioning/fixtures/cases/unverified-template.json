@@ -1,0 +1,4 @@
+{
+  "profilePatch": { "status": "UNVERIFIED_TEMPLATE" },
+  "expectedIssueCodes": ["PROFILE_NOT_COMMISSIONING_CANDIDATE"]
+}

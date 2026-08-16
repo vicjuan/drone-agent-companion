@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "bridge": { "enabledMemberCount": 1, "selectedAdapterMember": true } },
+  "expectedIssueCodes": ["BRIDGE_MEMBER_ENABLED", "SELECTED_ADAPTER_IS_BRIDGE_MEMBER"]
+}

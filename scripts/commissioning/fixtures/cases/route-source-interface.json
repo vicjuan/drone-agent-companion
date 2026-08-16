@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "routeToG520": { "sourceInterfaceIndex": 13 } },
+  "expectedIssueCodes": ["ROUTE_SOURCE_INTERFACE_MISMATCH"]
+}

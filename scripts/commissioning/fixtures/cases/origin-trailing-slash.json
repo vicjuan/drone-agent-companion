@@ -1,0 +1,4 @@
+{
+  "profilePatch": { "console": { "origin": "http://10.52.0.2:8080/" } },
+  "expectedIssueCodes": ["INVALID_CONSOLE_ORIGIN"]
+}

@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "ics": { "enabledConnectionCount": 1 } },
+  "expectedIssueCodes": ["ICS_ENABLED"]
+}

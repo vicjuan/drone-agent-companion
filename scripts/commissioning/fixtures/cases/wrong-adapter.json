@@ -1,0 +1,10 @@
+{
+  "snapshotPatch": {
+    "adapter": {
+      "exactMatchCount": 0,
+      "partialMatchCount": 1,
+      "ifIndex": 13
+    }
+  },
+  "expectedIssueCodes": ["ADAPTER_SELECTOR_MISMATCH"]
+}

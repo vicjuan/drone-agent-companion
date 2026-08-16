@@ -1,0 +1,7 @@
+{
+  "snapshotPatch": {
+    "captureStatus": "PARTIAL",
+    "queries": { "adapter": { "complete": false, "status": "ERROR" } }
+  },
+  "expectedIssueCodes": ["QUERY_FAILED", "SNAPSHOT_INCOMPLETE"]
+}

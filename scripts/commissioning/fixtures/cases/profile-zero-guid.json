@@ -1,0 +1,4 @@
+{
+  "profilePatch": { "operator": { "adapterGuid": "00000000-0000-0000-0000-000000000000" } },
+  "expectedIssueCodes": ["INVALID_ADAPTER_GUID"]
+}

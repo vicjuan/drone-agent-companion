@@ -57,3 +57,6 @@ jobs:
 
       - name: Test forwarded WebSocket evidence helper
         run: node --test scripts/verify-forwarded-console.test.mjs
+
+      - name: Test Windows commissioning preflight policy
+        run: node --test scripts/commissioning/validate-windows-point-to-point-preflight.test.mjs

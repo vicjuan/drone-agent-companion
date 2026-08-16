@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "routeToG520": { "routeResultCount": 2 } },
+  "expectedIssueCodes": ["ROUTE_SELECTION_COUNT"]
+}

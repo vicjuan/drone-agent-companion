@@ -37,6 +37,8 @@ touch UI is replaced by an on-device web server operated from a browser.
   MediaMTX/ffmpeg synthetic RTMP → WHEP fixture, loopback proof and Mac-only evidence ceiling.
 - [`docs/evidence/video-path-mac-runtime.md`](docs/evidence/video-path-mac-runtime.md): frozen
   Mac synthetic runtime result, conservative latency samples and explicit hardware limitations.
+- [`docs/g520-point-to-point-ethernet-commissioning.md`](docs/g520-point-to-point-ethernet-commissioning.md):
+  fail-closed Windows/G520 direct-Ethernet preparation and the remaining hardware gates.
 
 ## Workspace bootstrap
 

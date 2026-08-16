@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "dhcp": { "state": "Enabled" } },
+  "expectedIssueCodes": ["DHCP_ENABLED"]
+}

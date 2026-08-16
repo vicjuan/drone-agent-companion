@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "routeToG520": { "targetAddress": "10.52.0.3" } },
+  "expectedIssueCodes": ["ROUTE_TARGET_MISMATCH"]
+}

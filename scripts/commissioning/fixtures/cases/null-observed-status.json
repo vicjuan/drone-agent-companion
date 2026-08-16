@@ -1,0 +1,14 @@
+{
+  "snapshotPatch": {
+    "dhcp": { "state": null },
+    "ics": { "selectedAdapterEnabled": null },
+    "bridge": { "selectedAdapterMember": null },
+    "forwarding": { "selectedAdapterEnabled": null }
+  },
+  "expectedIssueCodes": [
+    "BRIDGE_STATUS_MISSING",
+    "DHCP_STATE_MISSING",
+    "FORWARDING_STATUS_MISSING",
+    "ICS_STATUS_MISSING"
+  ]
+}

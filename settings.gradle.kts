@@ -26,6 +26,7 @@ rootProject.name = "drone-agent-companion"
 // Android SDK. web-console is an npm project rather than a Gradle subproject.
 include(":console-protocol")
 include(":capability-matrix")
+include(":commissioning-network")
 include(":console-server")
 include(":console-adapter-mock")
 include(":console-runner")

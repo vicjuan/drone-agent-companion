@@ -1,0 +1,4 @@
+{
+  "profilePatch": { "operator": { "ifIndex": 12 } },
+  "expectedIssueCodes": ["PROFILE_IFINDEX_MUST_BE_NULL"]
+}

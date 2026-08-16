@@ -1,0 +1,4 @@
+{
+  "snapshotPatch": { "defaultRoute": { "count": 1 } },
+  "expectedIssueCodes": ["DEFAULT_ROUTE_PRESENT"]
+}

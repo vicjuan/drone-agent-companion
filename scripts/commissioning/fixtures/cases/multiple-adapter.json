@@ -1,0 +1,13 @@
+{
+  "snapshotPatch": {
+    "adapter": {
+      "exactMatchCount": 2,
+      "partialMatchCount": 0,
+      "adapterGuid": null,
+      "pnpDeviceIdSha256": null,
+      "ifIndex": null,
+      "operationalStatus": null
+    }
+  },
+  "expectedIssueCodes": ["ADAPTER_MULTIPLE"]
+}

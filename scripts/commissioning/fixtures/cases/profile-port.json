@@ -1,0 +1,4 @@
+{
+  "profilePatch": { "console": { "port": 8081 } },
+  "expectedIssueCodes": ["CONSOLE_PORT_MUST_BE_8080", "INVALID_CONSOLE_ORIGIN"]
+}

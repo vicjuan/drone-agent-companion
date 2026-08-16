@@ -1,0 +1,8 @@
+{
+  "snapshotPatch": {
+    "collector": {
+      "hostIdentitySha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "expectedIssueCodes": ["INVALID_HOST_IDENTITY_SHA256"]
+}
