@@ -1,0 +1,59 @@
+# MediaMTX v1.19.1 configuration for the issue #7A Mac-only synthetic fixture.
+#
+# The pinned container image is owned by scripts/media-fixture.sh:
+# bluenviron/mediamtx:1.19.1@sha256:61ebddaa43a6da78d4c6e98b9f9c12066856ffd85893656f5c000d870b88bbe4
+#
+# These listeners use container-network wildcard addresses intentionally. Docker
+# publishes them to the Mac host on 127.0.0.1 only; binding container loopback
+# would make bridge-network port forwarding unreachable. The runtime verifier
+# checks both Docker's bindings and the Mac listener table.
+
+logLevel: info
+logDestinations: [stdout]
+logStructured: false
+
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+        path: mock-main
+      - action: read
+        path: mock-main
+
+api: false
+metrics: false
+pprof: false
+playback: false
+
+rtsp: false
+
+rtmp: true
+rtmpEncryption: "no"
+rtmpAddress: :1936
+rtmpTrustedProxies: []
+
+hls: false
+
+webrtc: true
+webrtcAddress: :8891
+webrtcEncryption: false
+webrtcAllowOrigins: ["http://127.0.0.1:8891"]
+webrtcTrustedProxies: []
+webrtcLocalUDPAddress: :8190
+webrtcLocalTCPAddress: ""
+webrtcIPsFromInterfaces: false
+webrtcIPsFromInterfacesList: []
+webrtcAdditionalHosts: [127.0.0.1]
+webrtcICEServers2: []
+
+srt: false
+moq: false
+
+paths:
+  mock-main:
+    source: publisher
+    overridePublisher: false
+    record: false

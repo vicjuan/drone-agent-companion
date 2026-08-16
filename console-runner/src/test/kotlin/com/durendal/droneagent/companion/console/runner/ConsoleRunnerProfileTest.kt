@@ -10,6 +10,15 @@ class ConsoleRunnerProfileTest {
     fun `development runner remains loopback only`() {
         assertEquals("127.0.0.1", ConsoleRunnerProfile.BIND_HOST)
         assertEquals(8080, ConsoleRunnerProfile.BIND_PORT)
+        assertEquals("http://127.0.0.1:8891", ConsoleRunnerProfile.MEDIA_PLAYBACK_ORIGIN)
+
+        val media = ConsoleRunnerProfile.mediaPlaybackConfig()
+        assertEquals("synthetic_mac", media.sourceKind)
+        assertEquals(ConsoleRunnerProfile.STREAM_ID, media.streamId)
+        assertEquals(
+            "http://127.0.0.1:8891/${ConsoleRunnerProfile.STREAM_ID}",
+            media.pageUrl,
+        )
     }
 
     @Test

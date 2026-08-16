@@ -268,7 +268,7 @@ class WebAssetInstaller private constructor(
             WebAssetBundle(
                 listOf(
                     packaged("index.html", "72d76342c89f6a74635bd80abf99f7b348d001a4c1dea0a4260d56b217bdcd33"),
-                    packaged("styles.css", "5d0d80ea22c78016a12b40cd620c201378b2c65c5bfd968517507c33faff1086"),
+                    packaged("styles.css", "95082b469216b040802be61475442fa8a7841f2f1dcbb043c93e4c367ed89bfc"),
                     packaged("assets/capability-matrix.js", "e97b8c6ba9ab022613999b7fba9e08a8dab92df1f12e484ce9740921cba52116"),
                     packaged("assets/console-actions.js", "54b702b39cc4336b125d8871543e77cee3a5a0201130b406a6aa458d81d0a0c9"),
                     packaged("assets/console-client.js", "077faf4fa3865c35b523b6d27f9d3c40fbd8d2455b0183e5d352a05e4b6d5cc7"),
@@ -276,6 +276,7 @@ class WebAssetInstaller private constructor(
                     packaged("assets/console-state.js", "bf64847276b61632512bdaad5448b9d47a150e5c858e560819069d6cf7c90075"),
                     packaged("assets/continuous-hold.js", "1a9bdcbd618704acf541219a1d7c8aa42c44e2072b2b16f3cd55c9c01d633cd5"),
                     packaged("assets/main.js", "722a94f986a10090b0fb63fb430e8fba831ae078aad8efd4a9ff168beb1287cc"),
+                    packaged("assets/video-playback.js", "67eda0d42cda80324e6bdc66086ed35bdca31ff13b7113c5aab70528aef872ca"),
                     packaged("capability-matrix/g520-stack.json", "edc30d4bc9a1e1f0db4823e0428e74b54c5d512a3e9d2a21dcacf27ff26de14a"),
                 ),
             )

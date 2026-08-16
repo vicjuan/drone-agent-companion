@@ -39,12 +39,33 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 
+data class ConsoleMediaPlaybackConfig(
+    val origin: String,
+    val streamId: String,
+) {
+    init {
+        requireCanonicalMediaOrigin(origin)
+        require(CANONICAL_STREAM_ID.matches(streamId)) {
+            "streamId must be one canonical MediaMTX path segment"
+        }
+    }
+
+    val sourceKind: String = SOURCE_KIND
+    val pageUrl: String = "$origin/$streamId"
+
+    companion object {
+        const val SOURCE_KIND: String = "synthetic_mac"
+        private val CANONICAL_STREAM_ID = Regex("^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+    }
+}
+
 data class ConsoleServerConfig(
     val bindHost: String,
     val bindPort: Int,
     val webRoot: Path,
     val maxTextFrameBytes: Int = 64 * 1024,
     val allowedBrowserOrigin: String = browserOrigin("http", bindHost, bindPort),
+    val mediaPlayback: ConsoleMediaPlaybackConfig? = null,
     val startupTimeoutMillis: Long = 10_000L,
     val startupProbeToken: String = UUID.randomUUID().toString(),
 ) {
@@ -116,6 +137,7 @@ object ConsoleRoutes {
     const val HEALTH = "/healthz"
     const val READINESS = "/readyz"
     const val WEBSOCKET = "/api/console/v1"
+    const val MEDIA = "/api/console/v1/media"
 }
 
 /** Ktor CIO host shared by the Mac runner and the Android emulator candidate. */
@@ -259,6 +281,14 @@ fun Application.installConsoleApplication(
             call.respondText(
                 text = config.startupProbeToken,
                 contentType = ContentType.Text.Plain,
+                status = HttpStatusCode.OK,
+            )
+        }
+
+        get(ConsoleRoutes.MEDIA) {
+            call.respondText(
+                text = mediaPlaybackJson(config.mediaPlayback),
+                contentType = ContentType.Application.Json,
                 status = HttpStatusCode.OK,
             )
         }
@@ -415,12 +445,13 @@ private fun contentSecurityPolicy(config: ConsoleServerConfig): String {
     val origin = URI(config.allowedBrowserOrigin)
     val webSocketScheme = if (origin.scheme == "https") "wss" else "ws"
     val webSocketOrigin = browserOrigin(webSocketScheme, checkNotNull(origin.host), effectivePort(origin))
+    val frameSource = config.mediaPlayback?.origin ?: "'none'"
     return listOf(
         "default-src 'self'",
         "base-uri 'none'",
         "object-src 'none'",
         "frame-ancestors 'none'",
-        "frame-src 'none'",
+        "frame-src $frameSource",
         "form-action 'none'",
         "script-src 'self'",
         "style-src 'self'",
@@ -429,6 +460,14 @@ private fun contentSecurityPolicy(config: ConsoleServerConfig): String {
         "connect-src 'self' $webSocketOrigin",
     ).joinToString("; ")
 }
+
+private fun mediaPlaybackJson(config: ConsoleMediaPlaybackConfig?): String =
+    if (config == null) {
+        "{\"sourceKind\":null,\"streamId\":null,\"pageUrl\":null}"
+    } else {
+        "{\"sourceKind\":\"${config.sourceKind}\",\"streamId\":\"${config.streamId}\"," +
+            "\"pageUrl\":\"${config.pageUrl}\"}"
+    }
 
 private fun safeStaticRoot(webRoot: Path): SafeStaticRoot? {
     val lexicalPath = webRoot.toAbsolutePath().normalize()
@@ -490,6 +529,25 @@ private fun requireCanonicalBrowserOrigin(origin: String) {
     require(effectivePort in 0..65_535) { "allowedBrowserOrigin port is invalid" }
     require(origin == browserOrigin(uri.scheme, uri.host, effectivePort)) {
         "allowedBrowserOrigin must use canonical origin syntax"
+    }
+}
+
+private fun requireCanonicalMediaOrigin(origin: String) {
+    val uri =
+        runCatching { URI(origin) }
+            .getOrElse { throw IllegalArgumentException("media origin must be a URI", it) }
+    require(uri.scheme == "http") { "media origin must use http" }
+    require(uri.host == "127.0.0.1") {
+        "media origin must use the canonical IPv4 loopback host"
+    }
+    require(uri.rawUserInfo == null) { "media origin must not contain credentials" }
+    require(uri.rawPath.isNullOrEmpty() && uri.rawQuery == null && uri.rawFragment == null) {
+        "media origin must not contain a path, query, or fragment"
+    }
+    val effectivePort = effectivePort(uri)
+    require(effectivePort in 1..65_535) { "media origin port is invalid" }
+    require(origin == browserOrigin(uri.scheme, checkNotNull(uri.host), effectivePort)) {
+        "media origin must use canonical origin syntax"
     }
 }
 

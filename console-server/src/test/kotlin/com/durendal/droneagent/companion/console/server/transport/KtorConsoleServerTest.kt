@@ -108,6 +108,131 @@ class KtorConsoleServerTest {
     }
 
     @Test
+    fun `valid synthetic Mac playback constructs one fixed MediaMTX iframe page`() {
+        val media =
+            ConsoleMediaPlaybackConfig(
+                origin = "http://127.0.0.1:8889",
+                streamId = "weekend-demo",
+            )
+
+        assertEquals("synthetic_mac", media.sourceKind)
+        assertEquals("weekend-demo", media.streamId)
+        assertEquals("http://127.0.0.1:8889/weekend-demo", media.pageUrl)
+    }
+
+    @Test
+    fun `media playback rejects non-canonical non-loopback or credentialed origins`() {
+        val invalidOrigins =
+            listOf(
+                "",
+                "not-an-origin",
+                "https://127.0.0.1:8889",
+                "http://localhost:8889",
+                "http://0.0.0.0:8889",
+                "http://192.168.1.10:8889",
+                "http://*:8889",
+                "http://127.0.0.1:0",
+                "http://127.0.0.1:65536",
+                "http://127.0.0.1:8889/",
+                "http://127.0.0.1:8889/base",
+                "http://127.0.0.1:8889?autoplay=true",
+                "http://127.0.0.1:8889#media",
+                "http://operator@127.0.0.1:8889",
+                "http://operator:secret@127.0.0.1:8889",
+                "HTTP://127.0.0.1:8889",
+            )
+
+        invalidOrigins.forEach { origin ->
+            assertThrows("origin $origin must be rejected", IllegalArgumentException::class.java) {
+                ConsoleMediaPlaybackConfig(origin = origin, streamId = "weekend-demo")
+            }
+        }
+    }
+
+    @Test
+    fun `media playback rejects non-canonical stream ids`() {
+        val invalidStreamIds =
+            listOf(
+                "",
+                " ",
+                "/weekend-demo",
+                "weekend-demo/child",
+                "live/weekend-demo",
+                ".",
+                "..",
+                "weekend.demo",
+                "weekend%2Fdemo",
+                "weekend?demo",
+                "weekend#demo",
+                "-weekend-demo",
+                "a".repeat(65),
+            )
+
+        invalidStreamIds.forEach { streamId ->
+            assertThrows("streamId $streamId must be rejected", IllegalArgumentException::class.java) {
+                ConsoleMediaPlaybackConfig(
+                    origin = "http://127.0.0.1:8889",
+                    streamId = streamId,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `media route is disabled by default with exact null schema and restrictive CSP`() = testApplication {
+        application {
+            installConsoleApplication(
+                config(Files.createTempDirectory("console-media-disabled")),
+                RecordingController(),
+            )
+        }
+
+        val response = client.get(ConsoleRoutes.MEDIA)
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals(
+            "{\"sourceKind\":null,\"streamId\":null,\"pageUrl\":null}",
+            response.bodyAsText(),
+        )
+        assertTrue(checkNotNull(response.headers[HttpHeaders.ContentType]).startsWith("application/json"))
+        assertTrue(checkNotNull(response.headers["Content-Security-Policy"]).contains("frame-src 'none'"))
+    }
+
+    @Test
+    fun `configured media route returns exact playback schema and CSP allows only its origin`() = testApplication {
+        val media =
+            ConsoleMediaPlaybackConfig(
+                origin = "http://127.0.0.1:8889",
+                streamId = "weekend-demo",
+            )
+        application {
+            installConsoleApplication(
+                config(
+                    webRoot = Files.createTempDirectory("console-media-enabled"),
+                    mediaPlayback = media,
+                ),
+                RecordingController(),
+            )
+        }
+
+        val response = client.get(ConsoleRoutes.MEDIA)
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals(
+            "{\"sourceKind\":\"synthetic_mac\",\"streamId\":\"weekend-demo\"," +
+                "\"pageUrl\":\"http://127.0.0.1:8889/weekend-demo\"}",
+            response.bodyAsText(),
+        )
+        assertEquals(
+            "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; " +
+                "frame-src http://127.0.0.1:8889; form-action 'none'; script-src 'self'; " +
+                "style-src 'self'; img-src 'self'; font-src 'self'; " +
+                "connect-src 'self' ws://127.0.0.1:0",
+            response.headers["Content-Security-Policy"],
+        )
+    }
+
+    @Test
     fun `missing SPA artifact fails visibly instead of serving a placeholder success`() = testApplication {
         val missingRoot = Files.createTempDirectory("missing-console-root").resolve("dist")
         application {
@@ -275,13 +400,17 @@ class KtorConsoleServerTest {
             assertTrue(controller.closed.isEmpty())
         }
 
-    private fun config(webRoot: Path): ConsoleServerConfig =
+    private fun config(
+        webRoot: Path,
+        mediaPlayback: ConsoleMediaPlaybackConfig? = null,
+    ): ConsoleServerConfig =
         ConsoleServerConfig(
             bindHost = "127.0.0.1",
             bindPort = 0,
             webRoot = webRoot,
             maxTextFrameBytes = 1024,
             allowedBrowserOrigin = TEST_BROWSER_ORIGIN,
+            mediaPlayback = mediaPlayback,
         )
 
     private companion object {
