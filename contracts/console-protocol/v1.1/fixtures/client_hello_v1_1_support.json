@@ -1,0 +1,11 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-client-hello-v11-001",
+  "type": "client_hello",
+  "payload": {
+    "clientName": "web-console",
+    "clientVersion": "0.1.0",
+    "supportedProtocolVersions": ["1.1", "1.0"],
+    "authentication": null
+  }
+}

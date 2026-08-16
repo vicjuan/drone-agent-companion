@@ -12,6 +12,12 @@ test("built UI uses a progress value and contains no inline style mutation", asy
   assert.match(main, /<progress id="battery-progress"/);
   assert.match(main, /<dialog id="command-confirmation"/);
   assert.match(main, /batteryProgress\.value\s*=/);
+  assert.match(main, /surface\[action\]/);
+  assert.match(main, /surface\.virtual_stick/);
+  assert.match(main, /getIntentReadiness\(discreteActionIntent\(action\)\)/);
+  assert.match(main, /getControlSurfaceReadiness\(\)/);
+  assert.match(main, /runtimeTruth\(state,\s*nowMonotonicMs\)/);
+  assert.match(main, /runtime lock.*temporary commissioning grant/is);
   assert.doesNotMatch(main, /window\.confirm/);
   assert.doesNotMatch(main, /\.style\s*\./);
   assert.doesNotMatch(main, /setAttribute\([^)]*["']style["']/);

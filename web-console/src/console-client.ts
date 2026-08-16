@@ -1,15 +1,23 @@
 import {
   CONSOLE_PROTOCOL_VERSION,
+  SUPPORTED_CONSOLE_PROTOCOL_VERSIONS,
   decodeServerConsoleMessage,
   encodeClientConsoleMessage,
   type CommandRequestPayload,
   type ConsoleEnvelope,
   type ControlNeutralPayload,
+  type CommissioningIntent,
+  type ConsoleProtocolVersion,
   type ServerConsoleMessage,
 } from "./console-protocol.js";
 import {
+  CommissioningAuthorityConflictError,
   actuationReadiness,
+  controlSurfaceReadiness,
   createInitialConsoleState,
+  discreteActionIntent,
+  markCommissioningAuthorityConflict,
+  markCommissioningAuthorityLocallyExpired,
   markCommandSent,
   markConnecting,
   markHandshaking,
@@ -74,6 +82,8 @@ export interface CompanionConsoleClientOptions {
   readonly reconnectBaseDelayMs?: number;
   readonly reconnectMaximumDelayMs?: number;
   readonly handshakeTimeoutMs?: number;
+  /** Monotonic milliseconds; injected with the scheduler for deterministic expiry tests. */
+  readonly now?: () => number;
 }
 
 export interface ConsoleMessageIdFactoryOptions {
@@ -95,6 +105,7 @@ export class CompanionConsoleClient {
   private readonly reconnectBaseDelayMs: number;
   private readonly reconnectMaximumDelayMs: number;
   private readonly handshakeTimeoutMs: number;
+  private readonly now: () => number;
 
   private state: ConsoleViewState = createInitialConsoleState();
   private socket: ConsoleSocket | null = null;
@@ -103,6 +114,7 @@ export class CompanionConsoleClient {
   private reconnectHandle: unknown | null = null;
   private handshakeHandle: unknown | null = null;
   private leaseRenewalHandle: unknown | null = null;
+  private commissioningExpiryHandle: unknown | null = null;
   private controlIntervalHandle: unknown | null = null;
   private activeControl: ControlVector | null = null;
   private controlSequence = 0;
@@ -133,10 +145,24 @@ export class CompanionConsoleClient {
       options.handshakeTimeoutMs ?? 5_000,
       "handshakeTimeoutMs",
     );
+    this.now = options.now ?? browserMonotonicNow;
+    requireMonotonicNow(this.now());
   }
 
   getState(): ConsoleViewState {
     return this.state;
+  }
+
+  getIntentReadiness(intent: CommissioningIntent) {
+    return actuationReadiness(this.state, intent, this.monotonicNow());
+  }
+
+  getControlSurfaceReadiness() {
+    const nowMonotonicMs = this.monotonicNow();
+    return {
+      nowMonotonicMs,
+      surface: controlSurfaceReadiness(this.state, nowMonotonicMs),
+    };
   }
 
   start(): void {
@@ -152,6 +178,7 @@ export class CompanionConsoleClient {
     this.clearReconnect();
     this.clearHandshake();
     this.clearLeaseRenewal();
+    this.clearCommissioningExpiry();
     this.clearControlInterval();
     this.activeControl = null;
     const socket = this.socket;
@@ -166,7 +193,7 @@ export class CompanionConsoleClient {
   acquireLease(requestedTtlMs = DEFAULT_LEASE_TTL_MS): boolean {
     if (!this.isProtocolOnline()) return false;
     const message: ConsoleEnvelope<"lease_acquire"> = {
-      protocolVersion: CONSOLE_PROTOCOL_VERSION,
+      protocolVersion: this.negotiatedProtocolVersion(),
       messageId: this.idFactory(),
       type: "lease_acquire",
       payload: { requestedTtlMs },
@@ -178,7 +205,7 @@ export class CompanionConsoleClient {
     const leaseId = this.ownedLeaseId();
     if (leaseId === null || !this.isProtocolOnline()) return false;
     const message: ConsoleEnvelope<"lease_renew"> = {
-      protocolVersion: CONSOLE_PROTOCOL_VERSION,
+      protocolVersion: this.negotiatedProtocolVersion(),
       messageId: this.idFactory(),
       type: "lease_renew",
       payload: { leaseId, requestedTtlMs },
@@ -191,7 +218,7 @@ export class CompanionConsoleClient {
     if (leaseId === null || !this.isProtocolOnline()) return false;
     this.neutralizeControl("operator_release", true);
     const message: ConsoleEnvelope<"lease_release"> = {
-      protocolVersion: CONSOLE_PROTOCOL_VERSION,
+      protocolVersion: this.negotiatedProtocolVersion(),
       messageId: this.idFactory(),
       type: "lease_release",
       payload: { leaseId },
@@ -200,7 +227,7 @@ export class CompanionConsoleClient {
   }
 
   sendCommand(action: CommandRequestPayload["action"]): string | null {
-    const readiness = actuationReadiness(this.state);
+    const readiness = this.getIntentReadiness(discreteActionIntent(action));
     if (!readiness.enabled || readiness.leaseId === null) return null;
     // Stop producing frames locally. The discrete-command core owns one atomic neutral barrier
     // before every action; a separate asynchronous neutral request would race the command and
@@ -209,7 +236,7 @@ export class CompanionConsoleClient {
     this.activeControl = null;
     const commandId = this.idFactory();
     const message: ConsoleEnvelope<"command_request"> = {
-      protocolVersion: CONSOLE_PROTOCOL_VERSION,
+      protocolVersion: this.negotiatedProtocolVersion(),
       messageId: commandId,
       type: "command_request",
       payload: {
@@ -226,7 +253,7 @@ export class CompanionConsoleClient {
 
   beginControl(vector: ControlVector): boolean {
     requireNormalizedVector(vector);
-    const readiness = actuationReadiness(this.state);
+    const readiness = this.getIntentReadiness("virtual_stick");
     if (!readiness.enabled || readiness.leaseId === null) return false;
     if (this.activeControl !== null) {
       this.neutralizeControl("operator_release", false);
@@ -239,7 +266,7 @@ export class CompanionConsoleClient {
     this.clearControlInterval();
     this.controlIntervalHandle = this.scheduler.setInterval(() => {
       if (this.activeControl === null) return;
-      if (!actuationReadiness(this.state).enabled) {
+      if (!this.getIntentReadiness("virtual_stick").enabled) {
         this.neutralizeControl("operator_release", false);
         return;
       }
@@ -312,7 +339,7 @@ export class CompanionConsoleClient {
       payload: {
         clientName: "drone-agent-web-console",
         clientVersion: "0.1.0",
-        supportedProtocolVersions: [CONSOLE_PROTOCOL_VERSION],
+        supportedProtocolVersions: [...SUPPORTED_CONSOLE_PROTOCOL_VERSIONS],
         authentication: null,
       },
     };
@@ -334,22 +361,45 @@ export class CompanionConsoleClient {
       return;
     }
     let message: ServerConsoleMessage;
+    const selectedProtocolVersion = this.state.negotiatedProtocolVersion;
     try {
-      message = decodeServerConsoleMessage(data);
+      message = decodeServerConsoleMessage(
+        data,
+        selectedProtocolVersion ?? undefined,
+      );
     } catch {
       this.failConnection(generation, socket, "Server 訊息未通過 protocol 驗證");
       return;
     }
-    if (
-      message.type === "server_hello" &&
-      message.payload.selectedProtocolVersion !== CONSOLE_PROTOCOL_VERSION
-    ) {
-      this.failConnection(generation, socket, "Server 選擇不支援的 protocol version");
+    if (selectedProtocolVersion === null && message.type !== "server_hello") {
+      this.failConnection(generation, socket, "Server hello 必須是第一筆訊息");
+      return;
+    }
+    if (selectedProtocolVersion !== null && message.type === "server_hello") {
+      this.failConnection(generation, socket, "Server hello 不得重複");
       return;
     }
 
-    const wasReady = actuationReadiness(this.state).enabled;
-    this.updateState(reduceServerMessage(this.state, message));
+    let nextState: ConsoleViewState;
+    try {
+      nextState = reduceServerMessage(this.state, message, this.monotonicNow());
+    } catch (error) {
+      if (error instanceof CommissioningAuthorityConflictError) {
+        this.updateState(markCommissioningAuthorityConflict(this.state));
+        if (this.activeControl !== null) {
+          this.neutralizeControl("operator_release", false);
+        }
+        this.failConnection(
+          generation,
+          socket,
+          "Commissioning authority revision 衝突",
+        );
+        return;
+      }
+      this.failConnection(generation, socket, "Server state 無法安全套用");
+      return;
+    }
+    this.updateState(nextState);
     if (message.type === "server_hello") {
       this.clearHandshake();
       this.reconnectAttempt = 0;
@@ -357,8 +407,11 @@ export class CompanionConsoleClient {
     if (message.type === "lease_state") {
       this.onLeaseStateChanged();
     }
-    const isReady = actuationReadiness(this.state).enabled;
-    if (this.activeControl !== null && wasReady && !isReady) {
+    if (message.type === "commissioning_authority_state") {
+      this.onCommissioningAuthorityChanged(generation, socket);
+    }
+    const isReady = this.getIntentReadiness("virtual_stick").enabled;
+    if (this.activeControl !== null && !isReady) {
       this.neutralizeControl("operator_release", false);
     }
     if (
@@ -399,16 +452,58 @@ export class CompanionConsoleClient {
     }, renewInMs);
   }
 
+  private onCommissioningAuthorityChanged(
+    generation: number,
+    socket: ConsoleSocket,
+  ): void {
+    this.clearCommissioningExpiry();
+    const authority = this.state.commissioningAuthority;
+    if (
+      authority === null ||
+      authority.state !== "active" ||
+      authority.expiresAtMonotonicMs === null ||
+      authority.locallyExpired
+    ) {
+      return;
+    }
+    const remainingMs = authority.expiresAtMonotonicMs - this.monotonicNow();
+    if (remainingMs <= 0) {
+      this.expireCommissioningAuthority(authority.stateRevision);
+      return;
+    }
+    const stateRevision = authority.stateRevision;
+    let expiryHandle: unknown;
+    expiryHandle = this.scheduler.setTimeout(() => {
+      if (this.commissioningExpiryHandle !== expiryHandle) return;
+      this.commissioningExpiryHandle = null;
+      if (!this.isCurrent(generation, socket)) return;
+      this.expireCommissioningAuthority(stateRevision);
+    }, remainingMs);
+    this.commissioningExpiryHandle = expiryHandle;
+  }
+
+  private expireCommissioningAuthority(stateRevision: string): void {
+    const next = markCommissioningAuthorityLocallyExpired(
+      this.state,
+      stateRevision,
+    );
+    if (next === this.state) return;
+    this.updateState(next);
+    if (this.activeControl !== null) {
+      this.neutralizeControl("operator_release", false);
+    }
+  }
+
   private sendActiveControlFrame(): boolean {
     const vector = this.activeControl;
-    const readiness = actuationReadiness(this.state);
+    const readiness = this.getIntentReadiness("virtual_stick");
     if (vector === null || !readiness.enabled || readiness.leaseId === null) {
       return false;
     }
     const inputSequence = this.nextControlSequence(readiness.leaseId);
     if (inputSequence === null) return false;
     const message: ConsoleEnvelope<"control_frame"> = {
-      protocolVersion: CONSOLE_PROTOCOL_VERSION,
+      protocolVersion: this.negotiatedProtocolVersion(),
       messageId: this.idFactory(),
       type: "control_frame",
       payload: {
@@ -434,7 +529,7 @@ export class CompanionConsoleClient {
     const inputSequence = this.nextControlSequence(leaseId);
     if (inputSequence === null) return null;
     const message: ConsoleEnvelope<"control_neutral"> = {
-      protocolVersion: CONSOLE_PROTOCOL_VERSION,
+      protocolVersion: this.negotiatedProtocolVersion(),
       messageId: this.idFactory(),
       type: "control_neutral",
       payload: { leaseId, inputSequence, reason },
@@ -503,6 +598,7 @@ export class CompanionConsoleClient {
   private scheduleReconnect(detail: string): void {
     this.clearHandshake();
     this.clearLeaseRenewal();
+    this.clearCommissioningExpiry();
     this.clearControlInterval();
     this.activeControl = null;
     if (!this.wantsConnection) {
@@ -541,6 +637,20 @@ export class CompanionConsoleClient {
     );
   }
 
+  private negotiatedProtocolVersion(): ConsoleProtocolVersion {
+    const selected = this.state.negotiatedProtocolVersion;
+    if (selected === null) {
+      throw new Error("Console protocol has not been negotiated");
+    }
+    return selected;
+  }
+
+  private monotonicNow(): number {
+    const value = this.now();
+    requireMonotonicNow(value);
+    return value;
+  }
+
   private ownedLeaseId(): string | null {
     return ownsControlLease(this.state) ? this.state.lease?.leaseId ?? null : null;
   }
@@ -566,6 +676,12 @@ export class CompanionConsoleClient {
     if (this.leaseRenewalHandle === null) return;
     this.scheduler.clearTimeout(this.leaseRenewalHandle);
     this.leaseRenewalHandle = null;
+  }
+
+  private clearCommissioningExpiry(): void {
+    if (this.commissioningExpiryHandle === null) return;
+    this.scheduler.clearTimeout(this.commissioningExpiryHandle);
+    this.commissioningExpiryHandle = null;
   }
 
   private clearControlInterval(): void {
@@ -647,6 +763,16 @@ function requirePositiveDelay(value: number, name: string): number {
     throw new Error(`${name} must be a positive safe integer`);
   }
   return value;
+}
+
+function browserMonotonicNow(): number {
+  return globalThis.performance.now();
+}
+
+function requireMonotonicNow(value: number): void {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error("Monotonic time must be finite and non-negative");
+  }
 }
 
 function requireNormalizedVector(vector: ControlVector): void {

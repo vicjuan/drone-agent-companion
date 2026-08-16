@@ -2,12 +2,17 @@ package com.durendal.droneagent.companion.console.server.transport
 
 import com.durendal.droneagent.companion.console.protocol.CapabilitySnapshotPayload
 import com.durendal.droneagent.companion.console.protocol.ClientHelloPayload
+import com.durendal.droneagent.companion.console.protocol.CommissioningAuthorityReason
+import com.durendal.droneagent.companion.console.protocol.CommissioningAuthorityState
+import com.durendal.droneagent.companion.console.protocol.CommissioningAuthorityStatePayload
+import com.durendal.droneagent.companion.console.protocol.CommissioningIntent
 import com.durendal.droneagent.companion.console.protocol.CommandAckPayload
 import com.durendal.droneagent.companion.console.protocol.CommandDecision
 import com.durendal.droneagent.companion.console.protocol.CommandResultPayload
 import com.durendal.droneagent.companion.console.protocol.CommandResultStatus
 import com.durendal.droneagent.companion.console.protocol.ConsoleClientMessage
 import com.durendal.droneagent.companion.console.protocol.ConsoleServerPayload
+import com.durendal.droneagent.companion.console.protocol.ConsoleProtocolModule
 import com.durendal.droneagent.companion.console.protocol.ControlAckPayload
 import com.durendal.droneagent.companion.console.protocol.ControlAckStatus
 import com.durendal.droneagent.companion.console.protocol.ControlFramePayload
@@ -31,6 +36,10 @@ import com.durendal.droneagent.companion.console.protocol.ServerHelloPayload
 import com.durendal.droneagent.companion.console.protocol.TelemetryPayload
 import com.durendal.droneagent.companion.console.server.ConsoleCommandDecision
 import com.durendal.droneagent.companion.console.server.ConsoleCommandOutcome
+import com.durendal.droneagent.companion.console.server.ConsoleActuationIntent
+import com.durendal.droneagent.companion.console.server.ConsoleCommissioningAuthorityReason
+import com.durendal.droneagent.companion.console.server.ConsoleCommissioningAuthorityState
+import com.durendal.droneagent.companion.console.server.ConsoleCommissioningAuthorityStatus
 import com.durendal.droneagent.companion.console.server.ConsoleControlFrame
 import com.durendal.droneagent.companion.console.server.ConsoleControlNeutral
 import com.durendal.droneagent.companion.console.server.ConsoleControlStatus
@@ -43,6 +52,7 @@ import com.durendal.droneagent.companion.console.server.ConsoleLeaseStatus
 import com.durendal.droneagent.companion.console.server.ConsoleNeutralRequestReason
 import com.durendal.droneagent.companion.console.server.ConsoleSafetyTrigger
 import com.durendal.droneagent.companion.console.server.ConsoleServerCore
+import java.util.concurrent.ConcurrentHashMap
 
 /** Live snapshots are operational state and remain separate from hardware evidence truth. */
 interface ConsoleSnapshotProvider {
@@ -67,12 +77,28 @@ class ConsoleCoreProtocolAdapter(
     private val emitPayload: (targetSessionId: String?, payload: ConsoleServerPayload) -> Boolean,
 ) : ConsoleClientSessionHandler, ConsoleEventSink {
     private val leaseRequestMessageId = ThreadLocal<String?>()
+    private val sessionContexts = ConcurrentHashMap<String, AdapterSessionContext>()
 
     init {
         require(serverVersion.isNotBlank()) { "serverVersion must not be blank" }
     }
 
     override fun onSessionOpened(sessionId: String) = Unit
+
+    override fun onProtocolSelected(
+        sessionId: String,
+        selectedProtocolVersion: String,
+    ) {
+        check(ConsoleProtocolModule.isSupportedProtocolVersion(selectedProtocolVersion))
+        check(
+            sessionContexts.putIfAbsent(
+                sessionId,
+                AdapterSessionContext(selectedProtocolVersion, coreSession = null),
+            ) == null,
+        ) {
+            "protocol version is already selected for sessionId"
+        }
+    }
 
     override fun onClientMessage(
         sessionId: String,
@@ -140,7 +166,12 @@ class ConsoleCoreProtocolAdapter(
         sessionId: String,
         reason: String,
     ) {
-        coreProvider().disconnect(sessionId)
+        val context = sessionContexts[sessionId]
+        try {
+            coreProvider().disconnect(sessionId)
+        } finally {
+            if (context != null) sessionContexts.remove(sessionId, context)
+        }
     }
 
     override fun emit(
@@ -238,6 +269,20 @@ class ConsoleCoreProtocolAdapter(
                     ),
                 )
 
+            is ConsoleCoreEvent.CommissioningAuthorityChanged -> {
+                val target =
+                    requireNotNull(targetSessionId) {
+                        "commissioning authority state requires a target session"
+                    }
+                val context = sessionContexts[target]
+                if (context?.selectedProtocolVersion ==
+                    ConsoleProtocolModule.COMMISSIONING_AUTHORITY_PROTOCOL_VERSION &&
+                    context.coreSession === event.recipientSession
+                ) {
+                    emitPayload(target, event.state.toProtocol())
+                }
+            }
+
             is ConsoleCoreEvent.AuditRecorded -> Unit
         }
     }
@@ -255,21 +300,44 @@ class ConsoleCoreProtocolAdapter(
         if (payload.authentication != null) {
             throw ConsoleSessionProtocolException(ProtocolErrorCode.UNEXPECTED_MESSAGE)
         }
-        coreProvider().openSession(
+        val opened = coreProvider().openSession(
             sessionId = sessionId,
             clientInstanceId = "${payload.clientName}:${payload.clientVersion}",
         )
+        val selectedContext =
+            checkNotNull(sessionContexts[sessionId]) {
+                "transport protocol selection is missing"
+            }
+        val boundContext =
+            AdapterSessionContext(
+                selectedProtocolVersion = selectedContext.selectedProtocolVersion,
+                coreSession = opened.session,
+            )
+        check(sessionContexts.replace(sessionId, selectedContext, boundContext)) {
+            "transport protocol selection changed while Core session opened"
+        }
+        val selectedProtocolVersion = boundContext.selectedProtocolVersion
         requireEmit(
             sessionId,
             ServerHelloPayload(
                 sessionId = sessionId,
                 serverVersion = serverVersion,
-                selectedProtocolVersion = "1.0",
+                selectedProtocolVersion = selectedProtocolVersion,
                 authenticationRequired = false,
                 acceptedAuthenticationSchemes = emptyList(),
             ),
         )
+        // Public runtime truth remains LOCKED for DJI commissioning and precedes the specialized
+        // recipient-relative authority view on every successful v1.1 handshake.
         requireEmit(sessionId, snapshots.runtimeState())
+        if (selectedProtocolVersion ==
+            ConsoleProtocolModule.COMMISSIONING_AUTHORITY_PROTOCOL_VERSION
+        ) {
+            requireEmit(
+                sessionId,
+                coreProvider().currentCommissioningAuthorityState(sessionId).toProtocol(),
+            )
+        }
         requireEmit(sessionId, snapshots.capabilitySnapshot())
         requireEmit(sessionId, snapshots.health())
         snapshots.latestTelemetry()?.let { requireEmit(sessionId, it) }
@@ -324,6 +392,54 @@ class ConsoleCoreProtocolAdapter(
             reason = reason,
         )
 
+    private fun ConsoleCommissioningAuthorityState.toProtocol():
+        CommissioningAuthorityStatePayload =
+        CommissioningAuthorityStatePayload(
+            stateRevision = stateRevision.toString(),
+            state =
+                when (state) {
+                    ConsoleCommissioningAuthorityStatus.INACTIVE ->
+                        CommissioningAuthorityState.INACTIVE
+                    ConsoleCommissioningAuthorityStatus.ACTIVE ->
+                        CommissioningAuthorityState.ACTIVE
+                },
+            commissioningId = commissioningId,
+            generation = generation.toString(),
+            allowedIntents = allowedIntents.sortedBy { it.ordinal }.map { it.toProtocol() },
+            expiresInMs = expiresInMillis,
+            reason = reason?.toProtocol(),
+        )
+
+    private fun ConsoleActuationIntent.toProtocol(): CommissioningIntent =
+        when (this) {
+            ConsoleActuationIntent.TAKEOFF -> CommissioningIntent.TAKEOFF
+            ConsoleActuationIntent.LANDING -> CommissioningIntent.LANDING
+            ConsoleActuationIntent.RETURN_TO_HOME -> CommissioningIntent.RETURN_TO_HOME
+            ConsoleActuationIntent.VIRTUAL_STICK -> CommissioningIntent.VIRTUAL_STICK
+        }
+
+    private fun ConsoleCommissioningAuthorityReason.toProtocol(): CommissioningAuthorityReason =
+        when (this) {
+            ConsoleCommissioningAuthorityReason.NO_ACTIVE_SESSION ->
+                CommissioningAuthorityReason.NO_ACTIVE_SESSION
+            ConsoleCommissioningAuthorityReason.HOST_REVOKED ->
+                CommissioningAuthorityReason.HOST_REVOKED
+            ConsoleCommissioningAuthorityReason.TTL_EXPIRED ->
+                CommissioningAuthorityReason.TTL_EXPIRED
+            ConsoleCommissioningAuthorityReason.OPERATOR_DISCONNECTED ->
+                CommissioningAuthorityReason.OPERATOR_DISCONNECTED
+            ConsoleCommissioningAuthorityReason.OBSERVATION_LOST ->
+                CommissioningAuthorityReason.OBSERVATION_LOST
+            ConsoleCommissioningAuthorityReason.RUNTIME_STATE_CHANGED ->
+                CommissioningAuthorityReason.RUNTIME_STATE_CHANGED
+            ConsoleCommissioningAuthorityReason.SERVER_CLOSED ->
+                CommissioningAuthorityReason.SERVER_CLOSED
+            ConsoleCommissioningAuthorityReason.AUDIT_UNAVAILABLE ->
+                CommissioningAuthorityReason.AUDIT_UNAVAILABLE
+            ConsoleCommissioningAuthorityReason.DEADLINE_UNAVAILABLE ->
+                CommissioningAuthorityReason.DEADLINE_UNAVAILABLE
+        }
+
     private fun DiscreteCommandAction.toCore(): ConsoleDiscreteAction =
         when (this) {
             DiscreteCommandAction.TAKEOFF -> ConsoleDiscreteAction.TAKEOFF
@@ -355,4 +471,9 @@ class ConsoleCoreProtocolAdapter(
             ConsoleSafetyTrigger.ACTUATION_READINESS_LOST -> SafetyTrigger.ACTUATION_READINESS_LOST
             ConsoleSafetyTrigger.SERVER_STOP -> SafetyTrigger.SERVER_STOP
         }
+
+    private data class AdapterSessionContext(
+        val selectedProtocolVersion: String,
+        val coreSession: com.durendal.droneagent.companion.console.server.ConsoleSession?,
+    )
 }

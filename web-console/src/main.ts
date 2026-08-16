@@ -12,7 +12,7 @@ import {
   isHoldActivationKey,
 } from "./continuous-hold.js";
 import {
-  actuationReadiness,
+  discreteActionIntent,
   ownsControlLease,
   type CommandUiRecord,
   type ConsoleViewState,
@@ -235,7 +235,7 @@ refs.confirmationForm.addEventListener("submit", (event) => {
   const action = commandConfirmation.confirm();
   if (action === null) return;
   refs.confirmationDialog.close("confirm");
-  if (!actuationReadiness(client.getState()).enabled) return;
+  if (!client.getIntentReadiness(discreteActionIntent(action)).enabled) return;
   holdController.clearPresentation();
   client.sendCommand(action);
 });
@@ -295,7 +295,17 @@ render(client.getState());
 client.start();
 
 function render(state: ConsoleViewState): void {
-  const readiness = actuationReadiness(state);
+  const { nowMonotonicMs, surface } = client.getControlSurfaceReadiness();
+  const readyIntents = Object.entries(surface)
+    .filter(([, readiness]) => readiness.enabled)
+    .map(([intent]) => intent);
+  const overallReady = readyIntents.length > 0;
+  const controlModeLabel =
+    readyIntents.length === Object.keys(surface).length
+      ? "READY"
+      : overallReady
+        ? "PARTIAL READY"
+        : "BLOCKED";
   const connected = state.connectionPhase === "online";
   const safety = state.lastSafetyEvent;
   if (safety?.trigger === "client_request") {
@@ -322,7 +332,7 @@ function render(state: ConsoleViewState): void {
   refs.actuation.textContent = state.runtime ? state.runtime.actuationLock.toUpperCase() : "—";
   refs.actuation.dataset.tone = state.runtime?.actuationLock ?? "unknown";
   renderLease(state);
-  refs.runtimeTruth.textContent = runtimeTruth(state);
+  refs.runtimeTruth.textContent = runtimeTruth(state, nowMonotonicMs);
   refs.runtimeTruth.dataset.adapter = state.runtime?.adapter ?? "unknown";
   renderTelemetry(state);
 
@@ -339,10 +349,12 @@ function render(state: ConsoleViewState): void {
     ? `${state.lastProtocolError.code}${formatReason(state.lastProtocolError.detail)}`
     : "正常";
 
-  refs.controlModePill.textContent = readiness.enabled ? "READY" : "BLOCKED";
-  refs.controlModePill.className = readiness.enabled ? "mini-pill mini-pill--ready" : "mini-pill mini-pill--blocked";
-  refs.controlReadiness.textContent = readiness.reason;
-  refs.controlReadiness.className = readiness.enabled
+  refs.controlModePill.textContent = controlModeLabel;
+  refs.controlModePill.className = overallReady ? "mini-pill mini-pill--ready" : "mini-pill mini-pill--blocked";
+  refs.controlReadiness.textContent = overallReady
+    ? `本 session 目前可用 intents：${readyIntents.join(", ")}`
+    : surface.virtual_stick.reason;
+  refs.controlReadiness.className = overallReady
     ? "readiness-callout readiness-callout--ready"
     : "readiness-callout readiness-callout--blocked";
 
@@ -350,12 +362,24 @@ function render(state: ConsoleViewState): void {
   refs.leaseAcquire.disabled = !connected || state.lease?.state === "held";
   refs.leaseRenew.disabled = !connected || !ownsLease;
   refs.leaseRelease.disabled = !connected || !ownsLease;
-  for (const button of [...actionButtons, ...holdButtons]) {
+  for (const button of actionButtons) {
+    const action = button.dataset.action;
+    if (!isDiscreteAction(action)) continue;
+    const readiness = surface[action];
     button.disabled = !readiness.enabled;
     button.title = readiness.enabled ? "" : readiness.reason;
   }
-  if (!readiness.enabled) {
+  for (const button of holdButtons) {
+    button.disabled = !surface.virtual_stick.enabled;
+    button.title = surface.virtual_stick.enabled
+      ? ""
+      : surface.virtual_stick.reason;
+  }
+  if (!surface.virtual_stick.enabled) {
     holdController.clearPresentation();
+  }
+  const pendingAction = commandConfirmation.pendingAction;
+  if (pendingAction !== null && !surface[pendingAction].enabled) {
     closeCommandConfirmation("blocked");
   }
   renderCommandLog(state.commands);
@@ -461,11 +485,24 @@ function consoleWebSocketUrl(): string {
   return `${protocol}//${window.location.host}/api/console/v1`;
 }
 
-function runtimeTruth(state: ConsoleViewState): string {
+function runtimeTruth(
+  state: ConsoleViewState,
+  nowMonotonicMs: number,
+): string {
   if (state.runtime === null) return "Runtime 尚未回報；所有致動控制維持關閉。";
-  return state.runtime.adapter === "mock"
-    ? "目前為 Mock adapter：操作結果只代表模擬路徑，不構成 G520 或 aircraft 硬體證據。"
-    : "目前為 DJI adapter：是否可操作仍由 server 的 connection、actuation lock 與 commissioning gate 決定；UNKNOWN 不會自動開放致動。";
+  if (state.runtime.adapter === "mock") {
+    return "目前為 Mock adapter：操作結果只代表模擬路徑，不構成 G520 或 aircraft 硬體證據。";
+  }
+  const authority = state.commissioningAuthority;
+  if (
+    authority?.state === "active" &&
+    !authority.locallyExpired &&
+    authority.expiresAtMonotonicMs !== null &&
+    authority.expiresAtMonotonicMs > nowMonotonicMs
+  ) {
+    return `DJI runtime lock 維持 ${state.runtime.actuationLock.toUpperCase()}；本 session 只有 temporary commissioning grant 所列 intents：${authority.allowedIntents.join(", ")}。UNKNOWN 不會自動開放致動。`;
+  }
+  return `DJI runtime lock 維持 ${state.runtime.actuationLock.toUpperCase()}；本 session 沒有 active temporary commissioning grant，所有 DJI 致動維持關閉。`;
 }
 
 function connectionTone(phase: ConsoleViewState["connectionPhase"]): string {

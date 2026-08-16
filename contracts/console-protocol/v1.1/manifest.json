@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": "1.1",
+  "baseProtocolVersion": "1.0",
+  "baseCanonicalSha256": "6586515b8ad90ab58bb6e311087362a428ad06cd71a1c2ada5b5f62a8461aff5",
+  "bootstrapProtocolVersion": "1.0",
+  "envelopeFields": ["protocolVersion", "messageId", "type", "payload"],
+  "addedClientMessageTypes": [],
+  "addedServerMessageTypes": ["commissioning_authority_state"],
+  "commissioningAuthorityState": {
+    "payloadFields": ["stateRevision", "state", "commissioningId", "generation", "allowedIntents", "expiresInMs", "reason"],
+    "states": ["inactive", "active"],
+    "intents": ["takeoff", "landing", "return_to_home", "virtual_stick"],
+    "reasons": ["no_active_session", "host_revoked", "ttl_expired", "operator_disconnected", "observation_lost", "runtime_state_changed", "server_closed", "audit_unavailable", "deadline_unavailable"],
+    "canonicalDecimalStringFields": ["stateRevision", "generation"],
+    "remainingTtlMs": {"minimum": 1, "maximum": 300000}
+  },
+  "sessionOrdering": {
+    "serverHelloBeforeInitialAuthorityState": true,
+    "terminalAuthorityStateBeforeTransportCloseWhenWritable": true
+  },
+  "fixtures": [
+    {"path": "fixtures/client_hello_v1_1_support.json", "protocolVersion": "1.0", "direction": "client_to_server", "type": "client_hello", "sha256": "4cfb2bc37f8a0c72d2379feb720e043f4a16442c693cab4d6726952e6a05a067"},
+    {"path": "fixtures/commissioning_authority_active.json", "protocolVersion": "1.1", "direction": "server_to_client", "type": "commissioning_authority_state", "sha256": "2726143c9120b98cac13689ce8c2361ba3870343f74931ed6504b656cde5f3c6"},
+    {"path": "fixtures/commissioning_authority_initial_nonzero_revision.json", "protocolVersion": "1.1", "direction": "server_to_client", "type": "commissioning_authority_state", "sha256": "c53a83810851c67c717d6b88541621b94fc11bafefc6634fd234da7badf01994"},
+    {"path": "fixtures/commissioning_authority_terminal_host_revoked.json", "protocolVersion": "1.1", "direction": "server_to_client", "type": "commissioning_authority_state", "sha256": "95127660aab1ff771e70780edcc8a9a6ad19d62d71d9619cc1a6efff0a82cabe"},
+    {"path": "fixtures/server_hello_v1_1.json", "protocolVersion": "1.1", "direction": "server_to_client", "type": "server_hello", "sha256": "838249b5d1095007793722c698e8010215832c191b91514f9bc0b9e7a7a17efd"}
+  ]
+}

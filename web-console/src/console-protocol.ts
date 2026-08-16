@@ -1,4 +1,12 @@
 export const CONSOLE_PROTOCOL_VERSION = "1.0" as const;
+export const CONSOLE_COMMISSIONING_AUTHORITY_PROTOCOL_VERSION = "1.1" as const;
+export const SUPPORTED_CONSOLE_PROTOCOL_VERSIONS = Object.freeze([
+  CONSOLE_COMMISSIONING_AUTHORITY_PROTOCOL_VERSION,
+  CONSOLE_PROTOCOL_VERSION,
+] as const);
+
+export type ConsoleProtocolVersion =
+  (typeof SUPPORTED_CONSOLE_PROTOCOL_VERSIONS)[number];
 
 export const CONSOLE_MESSAGE_TYPES = Object.freeze([
   "client_hello",
@@ -45,11 +53,21 @@ export const SERVER_CONSOLE_MESSAGE_TYPES = Object.freeze([
   "protocol_error",
 ] as const);
 
-export type ConsoleMessageType = (typeof CONSOLE_MESSAGE_TYPES)[number];
+export const SERVER_CONSOLE_MESSAGE_TYPES_V1_1 = Object.freeze([
+  ...SERVER_CONSOLE_MESSAGE_TYPES,
+  "commissioning_authority_state",
+] as const);
+
+export const CONSOLE_MESSAGE_TYPES_V1_1 = Object.freeze([
+  ...CONSOLE_MESSAGE_TYPES,
+  "commissioning_authority_state",
+] as const);
+
+export type ConsoleMessageType = (typeof CONSOLE_MESSAGE_TYPES_V1_1)[number];
 export type ClientConsoleMessageType =
   (typeof CLIENT_CONSOLE_MESSAGE_TYPES)[number];
 export type ServerConsoleMessageType =
-  (typeof SERVER_CONSOLE_MESSAGE_TYPES)[number];
+  (typeof SERVER_CONSOLE_MESSAGE_TYPES_V1_1)[number];
 
 export interface ClientHelloPayload {
   readonly clientName: string;
@@ -64,7 +82,7 @@ export interface ClientHelloPayload {
 export interface ServerHelloPayload {
   readonly sessionId: string;
   readonly serverVersion: string;
-  readonly selectedProtocolVersion: string;
+  readonly selectedProtocolVersion: ConsoleProtocolVersion;
   readonly authenticationRequired: boolean;
   readonly acceptedAuthenticationSchemes: readonly string[];
 }
@@ -81,6 +99,33 @@ export interface RuntimeStatePayload {
     | "localhost_development"
     | "hardware_commissioning"
     | "operational";
+}
+
+export type CommissioningIntent =
+  | "takeoff"
+  | "landing"
+  | "return_to_home"
+  | "virtual_stick";
+
+export type CommissioningAuthorityReason =
+  | "no_active_session"
+  | "host_revoked"
+  | "ttl_expired"
+  | "operator_disconnected"
+  | "observation_lost"
+  | "runtime_state_changed"
+  | "server_closed"
+  | "audit_unavailable"
+  | "deadline_unavailable";
+
+export interface CommissioningAuthorityStatePayload {
+  readonly stateRevision: string;
+  readonly state: "inactive" | "active";
+  readonly commissioningId: string | null;
+  readonly generation: string;
+  readonly allowedIntents: readonly CommissioningIntent[];
+  readonly expiresInMs: number | null;
+  readonly reason: CommissioningAuthorityReason | null;
 }
 
 export interface TelemetryPayload {
@@ -239,10 +284,14 @@ export interface ConsolePayloadByType {
   readonly control_ack: ControlAckPayload;
   readonly safety_event: SafetyEventPayload;
   readonly protocol_error: ProtocolErrorPayload;
+  readonly commissioning_authority_state: CommissioningAuthorityStatePayload;
 }
 
-export type ConsoleEnvelope<T extends ConsoleMessageType> = Readonly<{
-  protocolVersion: typeof CONSOLE_PROTOCOL_VERSION;
+export type ConsoleEnvelope<
+  T extends ConsoleMessageType,
+  V extends ConsoleProtocolVersion = ConsoleProtocolVersion,
+> = Readonly<{
+  protocolVersion: V;
   messageId: string;
   type: T;
   payload: ConsolePayloadByType[T];
@@ -268,9 +317,16 @@ const ENVELOPE_FIELDS = new Set([
   "type",
   "payload",
 ]);
-const MESSAGE_TYPE_VALUES = new Set<string>(CONSOLE_MESSAGE_TYPES);
+const PROTOCOL_VERSION_VALUES = new Set<string>(SUPPORTED_CONSOLE_PROTOCOL_VERSIONS);
+const MESSAGE_TYPE_VALUES = new Set<string>(CONSOLE_MESSAGE_TYPES_V1_1);
 const CLIENT_MESSAGE_TYPE_VALUES = new Set<string>(CLIENT_CONSOLE_MESSAGE_TYPES);
-const SERVER_MESSAGE_TYPE_VALUES = new Set<string>(SERVER_CONSOLE_MESSAGE_TYPES);
+const SERVER_MESSAGE_TYPE_VALUES = new Set<string>(SERVER_CONSOLE_MESSAGE_TYPES_V1_1);
+const MESSAGE_TYPE_VALUES_BY_VERSION: Readonly<
+  Record<ConsoleProtocolVersion, ReadonlySet<string>>
+> = Object.freeze({
+  "1.0": new Set(CONSOLE_MESSAGE_TYPES),
+  "1.1": new Set(CONSOLE_MESSAGE_TYPES_V1_1),
+});
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const CAPABILITY_ID_PATTERN = /^[a-z][a-z0-9_]*$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -286,6 +342,9 @@ const MAX_CAPABILITY_ROWS = 256;
 const MAX_WIRE_MESSAGE_UTF8_BYTES = 65_536;
 const MAX_JSON_NESTING_DEPTH = 16;
 const G520_CAPABILITY_MATRIX_ID = "mini4pro-rcn3-g520-android";
+const MAX_SIGNED_LONG = 9_223_372_036_854_775_807n;
+const COMMISSIONING_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UTF8_ENCODER = new TextEncoder();
 const NUMBER_LEXEME_MARKER = "__consoleProtocolNumberLexeme__";
 const INTEGRAL_PAYLOAD_FIELDS: Readonly<
@@ -302,6 +361,7 @@ const INTEGRAL_PAYLOAD_FIELDS: Readonly<
   control_neutral: Object.freeze(["inputSequence"]),
   control_ack: Object.freeze(["inputSequence"]),
   safety_event: Object.freeze(["lastInputSequence"]),
+  commissioning_authority_state: Object.freeze(["expiresInMs"]),
 });
 
 /** Decode an inbound JSON message and detach it as a recursively immutable snapshot. */
@@ -319,8 +379,12 @@ export function decodeConsoleMessage(text: string): ConsoleMessage {
 }
 
 /** Decode a browser-to-server message and reject a valid message in the wrong direction. */
-export function decodeClientConsoleMessage(text: string): ClientConsoleMessage {
+export function decodeClientConsoleMessage(
+  text: string,
+  expectedProtocolVersion?: ConsoleProtocolVersion,
+): ClientConsoleMessage {
   const message = decodeConsoleMessage(text);
+  requireExpectedProtocolVersion(message, expectedProtocolVersion);
   if (!CLIENT_MESSAGE_TYPE_VALUES.has(message.type)) {
     throw new ConsoleProtocolValidationError(
       `Console message type ${message.type} is not valid from a client`,
@@ -330,8 +394,12 @@ export function decodeClientConsoleMessage(text: string): ClientConsoleMessage {
 }
 
 /** Decode a server-to-browser message and reject a valid message in the wrong direction. */
-export function decodeServerConsoleMessage(text: string): ServerConsoleMessage {
+export function decodeServerConsoleMessage(
+  text: string,
+  expectedProtocolVersion?: ConsoleProtocolVersion,
+): ServerConsoleMessage {
   const message = decodeConsoleMessage(text);
+  requireExpectedProtocolVersion(message, expectedProtocolVersion);
   if (!SERVER_MESSAGE_TYPE_VALUES.has(message.type)) {
     throw new ConsoleProtocolValidationError(
       `Console message type ${message.type} is not valid from a server`,
@@ -371,7 +439,12 @@ export function assertConsoleMessage(
 ): asserts value is ConsoleMessage {
   const envelope = requireRecord(value, "console envelope");
   requireExactKeys(envelope, ENVELOPE_FIELDS, "console envelope");
-  if (envelope.protocolVersion !== CONSOLE_PROTOCOL_VERSION) {
+  const protocolVersion = requireString(
+    envelope,
+    "protocolVersion",
+    "console envelope",
+  );
+  if (!PROTOCOL_VERSION_VALUES.has(protocolVersion)) {
     throw new ConsoleProtocolValidationError(
       "Unsupported console protocol version",
     );
@@ -381,6 +454,20 @@ export function assertConsoleMessage(
   if (!MESSAGE_TYPE_VALUES.has(type)) {
     throw new ConsoleProtocolValidationError("Unknown console message type");
   }
+  if (
+    !MESSAGE_TYPE_VALUES_BY_VERSION[
+      protocolVersion as ConsoleProtocolVersion
+    ].has(type)
+  ) {
+    throw new ConsoleProtocolValidationError(
+      `Console message type ${type} is unavailable in protocol ${protocolVersion}`,
+    );
+  }
+  if (type === "client_hello" && protocolVersion !== CONSOLE_PROTOCOL_VERSION) {
+    throw new ConsoleProtocolValidationError(
+      "client_hello must use bootstrap protocol 1.0",
+    );
+  }
 
   const messageType = type as ConsoleMessageType;
   switch (messageType) {
@@ -388,7 +475,10 @@ export function assertConsoleMessage(
       validateClientHello(envelope.payload);
       return;
     case "server_hello":
-      validateServerHello(envelope.payload);
+      validateServerHello(
+        envelope.payload,
+        protocolVersion as ConsoleProtocolVersion,
+      );
       return;
     case "runtime_state":
       validateRuntimeState(envelope.payload);
@@ -438,8 +528,25 @@ export function assertConsoleMessage(
     case "protocol_error":
       validateProtocolError(envelope.payload);
       return;
+    case "commissioning_authority_state":
+      validateCommissioningAuthorityState(envelope.payload);
+      return;
     default:
       return assertNever(messageType);
+  }
+}
+
+function requireExpectedProtocolVersion(
+  message: ConsoleMessage,
+  expectedProtocolVersion: ConsoleProtocolVersion | undefined,
+): void {
+  if (
+    expectedProtocolVersion !== undefined &&
+    message.protocolVersion !== expectedProtocolVersion
+  ) {
+    throw new ConsoleProtocolValidationError(
+      `Console message protocol ${message.protocolVersion} does not match negotiated ${expectedProtocolVersion}`,
+    );
   }
 }
 
@@ -511,7 +618,10 @@ function validateClientHello(value: unknown): void {
   }
 }
 
-function validateServerHello(value: unknown): void {
+function validateServerHello(
+  value: unknown,
+  envelopeProtocolVersion: ConsoleProtocolVersion,
+): void {
   const payload = requirePayload(value, [
     "sessionId",
     "serverVersion",
@@ -526,9 +636,12 @@ function validateServerHello(value: unknown): void {
     "server_hello payload",
     MAX_VERSION_LENGTH,
   );
-  if (payload.selectedProtocolVersion !== CONSOLE_PROTOCOL_VERSION) {
+  if (
+    payload.selectedProtocolVersion !== envelopeProtocolVersion ||
+    !PROTOCOL_VERSION_VALUES.has(String(payload.selectedProtocolVersion))
+  ) {
     throw new ConsoleProtocolValidationError(
-      "server_hello payload selectedProtocolVersion is unsupported",
+      "server_hello payload selectedProtocolVersion must match its supported envelope version",
     );
   }
   requireBoolean(payload, "authenticationRequired", "server_hello payload");
@@ -574,6 +687,107 @@ function validateRuntimeState(value: unknown): void {
     ["localhost_development", "hardware_commissioning", "operational"],
     "runtime_state payload",
   );
+}
+
+function validateCommissioningAuthorityState(value: unknown): void {
+  const payload = requirePayload(value, [
+    "stateRevision",
+    "state",
+    "commissioningId",
+    "generation",
+    "allowedIntents",
+    "expiresInMs",
+    "reason",
+  ], "commissioning_authority_state");
+  const stateRevision = requireCanonicalLongDecimal(
+    payload,
+    "stateRevision",
+    "commissioning_authority_state payload",
+  );
+  const generation = requireCanonicalLongDecimal(
+    payload,
+    "generation",
+    "commissioning_authority_state payload",
+  );
+  const state = requireEnum(
+    payload,
+    "state",
+    ["inactive", "active"],
+    "commissioning_authority_state payload",
+  );
+  const allowedIntents = requireUniqueNonBlankStringArray(
+    payload,
+    "allowedIntents",
+    "commissioning_authority_state payload",
+    { maximumItems: 4 },
+  );
+  const canonicalIntents = [
+    "takeoff",
+    "landing",
+    "return_to_home",
+    "virtual_stick",
+  ] as const;
+  if (
+    allowedIntents.some((intent) => !canonicalIntents.includes(intent as CommissioningIntent)) ||
+    allowedIntents.some((intent, index) => canonicalIntents.indexOf(intent as CommissioningIntent) <=
+      canonicalIntents.indexOf(allowedIntents[index - 1] as CommissioningIntent))
+  ) {
+    throw new ConsoleProtocolValidationError(
+      "commissioning_authority_state payload allowedIntents must be unique canonical intents in canonical order",
+    );
+  }
+  requireNullableSafeInteger(
+    payload,
+    "expiresInMs",
+    1,
+    300_000,
+    "commissioning_authority_state payload",
+  );
+  requireNullableNonBlankString(
+    payload,
+    "reason",
+    "commissioning_authority_state payload",
+  );
+  if (payload.reason !== null) {
+    requireEnum(
+      payload,
+      "reason",
+      [
+        "no_active_session",
+        "host_revoked",
+        "ttl_expired",
+        "operator_disconnected",
+        "observation_lost",
+        "runtime_state_changed",
+        "server_closed",
+        "audit_unavailable",
+        "deadline_unavailable",
+      ],
+      "commissioning_authority_state payload",
+    );
+  }
+
+  if (state === "active") {
+    requireCondition(stateRevision >= 1n, "active commissioning stateRevision must be positive");
+    requireUuidV4(payload, "commissioningId", "commissioning_authority_state payload");
+    requireCondition(generation >= 1n, "active commissioning generation must be positive");
+    requireCondition(allowedIntents.length > 0, "active commissioning allowlist must not be empty");
+    requireCondition(payload.expiresInMs !== null, "active commissioning expiry must be present");
+    requireCondition(payload.reason === null, "active commissioning reason must be null");
+    return;
+  }
+
+  requireCondition(allowedIntents.length === 0, "inactive commissioning allowlist must be empty");
+  requireCondition(payload.expiresInMs === null, "inactive commissioning expiry must be null");
+  if (payload.reason === "no_active_session") {
+    requireCondition(payload.commissioningId === null, "idle commissioning id must be null");
+    requireCondition(generation === 0n, "idle commissioning generation must be zero");
+    return;
+  }
+  requireCondition(stateRevision >= 1n, "terminal commissioning stateRevision must be positive");
+  requireUuidV4(payload, "commissioningId", "commissioning_authority_state payload");
+  requireCondition(generation >= 1n, "terminal commissioning generation must be positive");
+  requireCondition(payload.reason !== null, "inactive commissioning reason must be present");
 }
 
 function validateTelemetry(value: unknown): void {
@@ -1236,6 +1450,12 @@ function requireExactKeys(
   }
 }
 
+function requireCondition(condition: boolean, message: string): void {
+  if (!condition) {
+    throw new ConsoleProtocolValidationError(message);
+  }
+}
+
 function requireString(
   value: Record<string, unknown>,
   field: string,
@@ -1392,6 +1612,40 @@ function requireNullableIdentifier(
   if (value[field] !== null) {
     requireIdentifier(value, field, context);
   }
+}
+
+function requireUuidV4(
+  value: Record<string, unknown>,
+  field: string,
+  context: string,
+): string {
+  const candidate = requireString(value, field, context);
+  if (!COMMISSIONING_ID_PATTERN.test(candidate)) {
+    throw new ConsoleProtocolValidationError(
+      `${context} ${field} must be a lowercase UUIDv4`,
+    );
+  }
+  return candidate;
+}
+
+function requireCanonicalLongDecimal(
+  value: Record<string, unknown>,
+  field: string,
+  context: string,
+): bigint {
+  const candidate = requireString(value, field, context);
+  if (!/^(?:0|[1-9][0-9]{0,18})$/.test(candidate)) {
+    throw new ConsoleProtocolValidationError(
+      `${context} ${field} must be a canonical non-negative decimal string`,
+    );
+  }
+  const parsed = BigInt(candidate);
+  if (parsed > MAX_SIGNED_LONG) {
+    throw new ConsoleProtocolValidationError(
+      `${context} ${field} exceeds signed 64-bit range`,
+    );
+  }
+  return parsed;
 }
 
 function requireEnum<T extends string>(

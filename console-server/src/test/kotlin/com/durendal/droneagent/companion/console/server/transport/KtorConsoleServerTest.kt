@@ -309,7 +309,9 @@ class KtorConsoleServerTest {
         override fun onText(
             sessionId: String,
             text: String,
+            expectedSink: ConsoleFrameSink,
         ) {
+            check(sinks[sessionId] === expectedSink)
             textFrames += sessionId to text
             if (echo) checkNotNull(sinks[sessionId]).offer("echo:$text")
         }
@@ -317,14 +319,18 @@ class KtorConsoleServerTest {
         override fun onProtocolViolation(
             sessionId: String,
             reason: String,
+            expectedSink: ConsoleFrameSink,
         ) {
+            check(sinks[sessionId] === expectedSink)
             violations += sessionId to reason
         }
 
         override fun onClose(
             sessionId: String,
             reason: String,
+            expectedSink: ConsoleFrameSink,
         ) {
+            check(sinks[sessionId] === expectedSink)
             sinks -= sessionId
             closed += sessionId to reason
         }

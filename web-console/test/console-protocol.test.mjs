@@ -5,8 +5,12 @@ import test from "node:test";
 
 import {
   CLIENT_CONSOLE_MESSAGE_TYPES,
+  CONSOLE_COMMISSIONING_AUTHORITY_PROTOCOL_VERSION,
+  CONSOLE_MESSAGE_TYPES_V1_1,
   CONSOLE_PROTOCOL_VERSION,
   SERVER_CONSOLE_MESSAGE_TYPES,
+  SERVER_CONSOLE_MESSAGE_TYPES_V1_1,
+  SUPPORTED_CONSOLE_PROTOCOL_VERSIONS,
   assertConsoleMessage,
   decodeClientConsoleMessage,
   decodeConsoleMessage,
@@ -18,6 +22,10 @@ import {
 
 const contractDirectory = new URL(
   "../../contracts/console-protocol/v1/",
+  import.meta.url,
+);
+const v11ContractDirectory = new URL(
+  "../../contracts/console-protocol/v1.1/",
   import.meta.url,
 );
 const fixtureDirectory = new URL(
@@ -87,6 +95,17 @@ const fixtureTexts = await Promise.all(
   ),
 );
 const fixtures = fixtureTexts.map((text) => JSON.parse(text));
+const v11ManifestText = await readFile(
+  new URL("manifest.json", v11ContractDirectory),
+  "utf8",
+);
+const v11Manifest = JSON.parse(v11ManifestText);
+const v11FixtureTexts = await Promise.all(
+  v11Manifest.fixtures.map((entry) =>
+    readFile(new URL(entry.path, v11ContractDirectory), "utf8"),
+  ),
+);
+const v11Fixtures = v11FixtureTexts.map((text) => JSON.parse(text));
 
 test("manifest and digests lock every shared Kotlin/TypeScript fixture", () => {
   assert.equal(manifest.schemaVersion, 1);
@@ -139,6 +158,148 @@ test("manifest and digests lock every shared Kotlin/TypeScript fixture", () => {
       assert.deepEqual(decodeServerConsoleMessage(text), decoded);
     }
   }
+});
+
+test("v1.1 delta fixtures lock bootstrap negotiation and the exact server-only inventory", async () => {
+  assert.deepEqual([...SUPPORTED_CONSOLE_PROTOCOL_VERSIONS], ["1.1", "1.0"]);
+  assert.equal(
+    CONSOLE_COMMISSIONING_AUTHORITY_PROTOCOL_VERSION,
+    v11Manifest.protocolVersion,
+  );
+  assert.equal(v11Manifest.bootstrapProtocolVersion, CONSOLE_PROTOCOL_VERSION);
+  assert.deepEqual(v11Manifest.addedClientMessageTypes, []);
+  assert.deepEqual(v11Manifest.addedServerMessageTypes, [
+    "commissioning_authority_state",
+  ]);
+  assert.deepEqual(
+    [...CONSOLE_MESSAGE_TYPES_V1_1],
+    [...new Set([...expectedTypes, "commissioning_authority_state"])],
+  );
+  assert.deepEqual(
+    [...SERVER_CONSOLE_MESSAGE_TYPES_V1_1],
+    [...SERVER_CONSOLE_MESSAGE_TYPES, "commissioning_authority_state"],
+  );
+
+  const canonicalDigestText = await readFile(
+    new URL("CANONICAL.sha256", v11ContractDirectory),
+    "utf8",
+  );
+  const canonicalParts = canonicalDigestText.trim().split(/\s+/);
+  assert.deepEqual(canonicalParts.slice(1), ["manifest.json"]);
+  assert.equal(sha256(v11ManifestText), canonicalParts[0]);
+
+  for (const [index, text] of v11FixtureTexts.entries()) {
+    const entry = v11Manifest.fixtures[index];
+    assert.equal(sha256(text), entry.sha256);
+    const decoded = entry.direction === "client_to_server"
+      ? decodeClientConsoleMessage(text)
+      : decodeServerConsoleMessage(text);
+    assert.equal(decoded.type, entry.type);
+    assert.equal(decoded.protocolVersion, entry.protocolVersion);
+    assert.deepEqual(decodeConsoleMessage(encodeConsoleMessage(decoded)), decoded);
+  }
+});
+
+test("bootstrap hello and every post-selection envelope use the strict negotiated inventory", () => {
+  const clientHello = v11FixtureOf("client_hello");
+  const serverHello = v11FixtureOf("server_hello");
+  const authority = v11FixtureOf("commissioning_authority_state", "active");
+
+  assert.equal(clientHello.protocolVersion, "1.0");
+  assertRejected({ ...clientHello, protocolVersion: "1.1" }, /bootstrap|1\.0/i);
+  assertAccepted(serverHello);
+  assertRejected(
+    {
+      ...serverHello,
+      payload: { ...serverHello.payload, selectedProtocolVersion: "1.0" },
+    },
+    /selected|match|envelope/i,
+  );
+
+  assertAccepted(authority);
+  assertRejected({ ...authority, protocolVersion: "1.0" }, /unavailable|1\.0/i);
+  assert.throws(
+    () => decodeServerConsoleMessage(JSON.stringify(authority), "1.0"),
+    /negotiated|match/i,
+  );
+  assert.equal(
+    decodeServerConsoleMessage(JSON.stringify(authority), "1.1").type,
+    "commissioning_authority_state",
+  );
+
+  const postHandshakeClientMessage = {
+    ...fixtureOf("lease_acquire"),
+    protocolVersion: "1.1",
+  };
+  assert.equal(
+    decodeClientConsoleMessage(
+      encodeClientConsoleMessage(postHandshakeClientMessage),
+      "1.1",
+    ).protocolVersion,
+    "1.1",
+  );
+});
+
+test("commissioning authority validates canonical decimals, intent order, TTL, and state shape", () => {
+  const active = v11FixtureOf("commissioning_authority_state", "active");
+  const idle = v11FixtureOf("commissioning_authority_state", "no_active_session");
+  const terminal = v11FixtureOf("commissioning_authority_state", "host_revoked");
+  for (const fixture of [active, idle, terminal]) assertAccepted(fixture);
+
+  for (const [field, value] of [
+    ["stateRevision", "01"],
+    ["stateRevision", "+1"],
+    ["stateRevision", "9223372036854775808"],
+    ["generation", "-1"],
+    ["generation", "1.0"],
+  ]) {
+    assertRejected(
+      { ...active, payload: { ...active.payload, [field]: value } },
+      /decimal|64-bit|canonical/i,
+    );
+  }
+
+  for (const allowedIntents of [
+    [],
+    ["virtual_stick", "landing"],
+    ["landing", "landing"],
+    ["launch"],
+  ]) {
+    assertRejected(
+      { ...active, payload: { ...active.payload, allowedIntents } },
+      /allowlist|intent|canonical|duplicate/i,
+    );
+  }
+  for (const expiresInMs of [null, 0, 300_001, 1.5]) {
+    assertRejected(
+      { ...active, payload: { ...active.payload, expiresInMs } },
+      /expiry|expiresInMs|integer|range/i,
+    );
+  }
+  assertRejected(
+    { ...active, payload: { ...active.payload, commissioningId: "not-a-uuid" } },
+    /UUID/i,
+  );
+  assertRejected(
+    { ...active, payload: { ...active.payload, reason: "host_revoked" } },
+    /reason/i,
+  );
+  assertRejected(
+    { ...idle, payload: { ...idle.payload, generation: "1" } },
+    /generation|zero/i,
+  );
+  assertRejected(
+    { ...idle, payload: { ...idle.payload, commissioningId: active.payload.commissioningId } },
+    /id|null/i,
+  );
+  assertRejected(
+    { ...terminal, payload: { ...terminal.payload, expiresInMs: 1 } },
+    /inactive|expiry/i,
+  );
+  assertRejected(
+    { ...terminal, payload: { ...terminal.payload, unexpected: true } },
+    /unknown|field/i,
+  );
 });
 
 test("decoder returns a recursively frozen protocol snapshot", () => {
@@ -772,6 +933,17 @@ test("control messages reject unsafe or non-positive input sequences", () => {
 function fixtureOf(type) {
   const fixture = fixtures.find((candidate) => candidate.type === type);
   assert.notEqual(fixture, undefined, `missing canonical fixture for ${type}`);
+  return fixture;
+}
+
+function v11FixtureOf(type, discriminator = null) {
+  const fixture = v11Fixtures.find((candidate) =>
+    candidate.type === type &&
+    (discriminator === null ||
+      candidate.payload.state === discriminator ||
+      candidate.payload.reason === discriminator),
+  );
+  assert.notEqual(fixture, undefined, `missing v1.1 fixture for ${type}`);
   return fixture;
 }
 

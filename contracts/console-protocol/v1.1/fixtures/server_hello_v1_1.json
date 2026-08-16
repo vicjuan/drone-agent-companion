@@ -1,0 +1,12 @@
+{
+  "protocolVersion": "1.1",
+  "messageId": "fixture-server-hello-v11-001",
+  "type": "server_hello",
+  "payload": {
+    "sessionId": "session-v11-001",
+    "serverVersion": "0.1.0",
+    "selectedProtocolVersion": "1.1",
+    "authenticationRequired": false,
+    "acceptedAuthenticationSchemes": []
+  }
+}

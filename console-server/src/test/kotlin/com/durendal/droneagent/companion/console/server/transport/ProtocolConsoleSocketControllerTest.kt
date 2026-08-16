@@ -1,11 +1,13 @@
 package com.durendal.droneagent.companion.console.server.transport
 
 import com.durendal.droneagent.companion.console.protocol.ClientHelloPayload
+import com.durendal.droneagent.companion.console.protocol.AuthenticationPresentation
 import com.durendal.droneagent.companion.console.protocol.ActuationLockState
 import com.durendal.droneagent.companion.console.protocol.AdapterKind
 import com.durendal.droneagent.companion.console.protocol.AircraftConnectionState
 import com.durendal.droneagent.companion.console.protocol.ConsoleClientMessage
 import com.durendal.droneagent.companion.console.protocol.ConsoleProtocolCodec
+import com.durendal.droneagent.companion.console.protocol.ConsoleProtocolModule
 import com.durendal.droneagent.companion.console.protocol.ConsoleServerPayload
 import com.durendal.droneagent.companion.console.protocol.HealthPayload
 import com.durendal.droneagent.companion.console.protocol.HealthStatus
@@ -18,9 +20,12 @@ import com.durendal.droneagent.companion.console.protocol.ProtocolErrorPayload
 import com.durendal.droneagent.companion.console.protocol.RuntimeStatePayload
 import com.durendal.droneagent.companion.console.protocol.ServerHelloPayload
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -39,15 +44,16 @@ class ProtocolConsoleSocketControllerTest {
         controller.onText(
             "session-1",
             client("lease-before-hello", LeaseAcquirePayload(requestedTtlMs = 5_000)),
+            sink,
         )
 
         assertTrue(handler.messages.isEmpty())
         assertEquals(ProtocolErrorCode.HANDSHAKE_REQUIRED, sink.lastProtocolError().code)
 
-        controller.onText("session-1", client("hello-1", hello()))
+        controller.onText("session-1", client("hello-1", hello()), sink)
         assertEquals(listOf("hello-1"), handler.messages.map { it.second.messageId })
 
-        controller.onText("session-1", client("hello-duplicate", hello()))
+        controller.onText("session-1", client("hello-duplicate", hello()), sink)
         assertEquals(ProtocolErrorCode.UNEXPECTED_MESSAGE, sink.lastProtocolError().code)
         assertEquals(listOf("hello-1"), handler.messages.map { it.second.messageId })
     }
@@ -58,7 +64,7 @@ class ProtocolConsoleSocketControllerTest {
         val controller = controller(handler)
         val sink = RecordingFrameSink()
         controller.onOpen("session-1", sink)
-        controller.onText("session-1", client("hello-1", hello()))
+        controller.onText("session-1", client("hello-1", hello()), sink)
 
         controller.onText(
             "session-1",
@@ -74,6 +80,7 @@ class ProtocolConsoleSocketControllerTest {
                 "authority":{"originType":"operator"}
               }
             }""".trimIndent(),
+            sink,
         )
 
         assertEquals(listOf("hello-1"), handler.messages.map { it.second.messageId })
@@ -89,8 +96,8 @@ class ProtocolConsoleSocketControllerTest {
         val sink = RecordingFrameSink()
         controller.onOpen("session-1", sink)
 
-        controller.onText("session-1", client("hello-1", hello()))
-        controller.onClose("session-1", "peer_closed")
+        controller.onText("session-1", client("hello-1", hello()), sink)
+        controller.onClose("session-1", "peer_closed", sink)
 
         val error = sink.lastProtocolError()
         assertEquals(ProtocolErrorCode.SERVER_UNAVAILABLE, error.code)
@@ -109,6 +116,16 @@ class ProtocolConsoleSocketControllerTest {
                         assertTrue(
                             controller.emit(
                                 sessionId,
+                                HealthPayload(
+                                    HealthStatus.HEALTHY,
+                                    uptimeMs = 5L,
+                                    detail = null,
+                                ),
+                            ),
+                        )
+                        assertTrue(
+                            controller.emit(
+                                sessionId,
                                 ServerHelloPayload(
                                     sessionId = sessionId,
                                     serverVersion = "0.1.0",
@@ -121,14 +138,17 @@ class ProtocolConsoleSocketControllerTest {
                     }
                 },
             )
-        controller = controller(handler)
+        controller = controller(handler, autoServerHello = false)
         val readySink = RecordingFrameSink()
         val waitingSink = RecordingFrameSink()
         controller.onOpen("session-ready", readySink)
         controller.onOpen("session-waiting", waitingSink)
 
-        controller.onText("session-ready", client("hello-ready", hello()))
-        assertEquals("server_hello", readySink.decoded.single().type.wireName)
+        controller.onText("session-ready", client("hello-ready", hello()), readySink)
+        assertEquals(
+            listOf("server_hello", "health"),
+            readySink.decoded.map { it.type.wireName },
+        )
 
         assertTrue(
             controller.emit(
@@ -137,8 +157,203 @@ class ProtocolConsoleSocketControllerTest {
             ),
         )
 
-        assertEquals(listOf("server_hello", "health"), readySink.decoded.map { it.type.wireName })
+        assertEquals(
+            listOf("server_hello", "health", "health"),
+            readySink.decoded.map { it.type.wireName },
+        )
         assertTrue(waitingSink.frames.isEmpty())
+    }
+
+    @Test
+    fun `negotiated sessions use exact versions for hello ready input broadcast and errors`() {
+        val handler = RecordingSessionHandler()
+        val controller = controller(handler)
+        val legacySink = RecordingFrameSink()
+        val currentSink = RecordingFrameSink()
+        controller.onOpen("session-v10", legacySink)
+        controller.onOpen("session-v11", currentSink)
+
+        controller.onText(
+            "session-v10",
+            client("hello-v10", hello(listOf("1.0"))),
+            legacySink,
+        )
+        controller.onText(
+            "session-v11",
+            client("hello-v11", hello(listOf("1.1", "1.0"))),
+            currentSink,
+        )
+
+        assertEquals(
+            listOf("session-v10" to "1.0", "session-v11" to "1.1"),
+            handler.selected,
+        )
+        assertEquals(
+            "1.0",
+            (legacySink.decoded("1.0").first().payload as ServerHelloPayload)
+                .selectedProtocolVersion,
+        )
+        assertEquals(
+            "1.1",
+            (currentSink.decoded("1.1").first().payload as ServerHelloPayload)
+                .selectedProtocolVersion,
+        )
+
+        assertTrue(
+            controller.emit(
+                null,
+                HealthPayload(HealthStatus.HEALTHY, uptimeMs = 10L, detail = null),
+            ),
+        )
+        assertEquals("1.0", codec.inspectEnvelope(legacySink.frames.last(), "1.0").protocolVersion)
+        assertEquals("1.1", codec.inspectEnvelope(currentSink.frames.last(), "1.1").protocolVersion)
+
+        controller.onText(
+            "session-v11",
+            client(
+                "lease-v11",
+                LeaseAcquirePayload(requestedTtlMs = 5_000),
+                protocolVersion = "1.1",
+            ),
+            currentSink,
+        )
+        assertEquals("lease-v11", handler.messages.last().second.messageId)
+
+        controller.onText(
+            "session-v11",
+            """{"protocolVersion":"1.1","messageId":"bad-v11","type":"lease_acquire","payload":{"requestedTtlMs":0}}""",
+            currentSink,
+        )
+        val error = currentSink.decoded("1.1").last().payload as ProtocolErrorPayload
+        assertEquals(ProtocolErrorCode.INVALID_PAYLOAD, error.code)
+        assertEquals("bad-v11", error.relatedMessageId)
+    }
+
+    @Test
+    fun `rejected hello sends only a bootstrap error and closes`() {
+        val handler =
+            RecordingSessionHandler(
+                onMessage = { _, message ->
+                    if ((message.payload as? ClientHelloPayload)?.authentication != null) {
+                        throw ConsoleSessionProtocolException(ProtocolErrorCode.UNEXPECTED_MESSAGE)
+                    }
+                },
+            )
+        val controller = controller(handler)
+        val sink = RecordingFrameSink()
+        controller.onOpen("session-1", sink)
+
+        controller.onText(
+            "session-1",
+            client(
+                "hello-auth",
+                hello(
+                    supportedProtocolVersions = listOf("1.1", "1.0"),
+                    authentication = AuthenticationPresentation("token", "not-logged"),
+                ),
+            ),
+            sink,
+        )
+
+        val frames = sink.decoded("1.0")
+        assertEquals(listOf("protocol_error"), frames.map { it.type.wireName })
+        assertEquals(
+            ProtocolErrorCode.UNEXPECTED_MESSAGE,
+            (frames.single().payload as ProtocolErrorPayload).code,
+        )
+        assertEquals(
+            listOf("session-1" to "session_rejected:unexpected_message"),
+            handler.closed,
+        )
+    }
+
+    @Test
+    fun `closing connection tombstone and sink identity reject same-id ABA`() {
+        lateinit var controller: ProtocolConsoleSocketController
+        val firstHello = AtomicBoolean(true)
+        val helloEntered = CountDownLatch(1)
+        val releaseHello = CountDownLatch(1)
+        val handler =
+            RecordingSessionHandler(
+                onMessage = { sessionId, message ->
+                    if (message.payload is ClientHelloPayload) {
+                        if (firstHello.compareAndSet(true, false)) {
+                            helloEntered.countDown()
+                            check(releaseHello.await(2L, TimeUnit.SECONDS))
+                        }
+                        check(controller.emit(sessionId, serverHello(sessionId)))
+                    }
+                },
+            )
+        controller = controller(handler, autoServerHello = false)
+        val oldSink = RecordingFrameSink()
+        controller.onOpen("session-reused", oldSink)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val oldHello =
+                pool.submit {
+                    controller.onText(
+                        "session-reused",
+                        client("hello-old", hello()),
+                        oldSink,
+                    )
+                }
+            assertTrue(helloEntered.await(1L, TimeUnit.SECONDS))
+
+            val terminatorThread = AtomicReference<Thread>()
+            val terminatorStarted = CountDownLatch(1)
+            val terminating =
+                pool.submit {
+                    terminatorThread.set(Thread.currentThread())
+                    terminatorStarted.countDown()
+                    controller.onProtocolViolation(
+                        "session-reused",
+                        "old_transport_failure",
+                        oldSink,
+                    )
+                }
+            assertTrue(terminatorStarted.await(1L, TimeUnit.SECONDS))
+            val blockDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L)
+            while (terminatorThread.get()?.state != Thread.State.BLOCKED &&
+                System.nanoTime() < blockDeadline
+            ) {
+                Thread.yield()
+            }
+            assertEquals(Thread.State.BLOCKED, terminatorThread.get()?.state)
+
+            val rejectedReplacement = RecordingFrameSink()
+            controller.onOpen("session-reused", rejectedReplacement)
+            assertEquals(
+                listOf("duplicate_server_session_id"),
+                rejectedReplacement.closeReasons,
+            )
+
+            releaseHello.countDown()
+            oldHello.get(1L, TimeUnit.SECONDS)
+            terminating.get(1L, TimeUnit.SECONDS)
+
+            val replacementSink = RecordingFrameSink()
+            controller.onOpen("session-reused", replacementSink)
+            controller.onText(
+                "session-reused",
+                client("hello-new", hello()),
+                replacementSink,
+            )
+            controller.onClose("session-reused", "late_old_close", oldSink)
+
+            assertEquals(
+                listOf("server_hello"),
+                replacementSink.decoded.map { it.type.wireName },
+            )
+            assertTrue(replacementSink.closeReasons.isEmpty())
+            assertEquals(
+                listOf("session-reused" to "protocol_violation:old_transport_failure"),
+                handler.closed,
+            )
+        } finally {
+            releaseHello.countDown()
+            pool.shutdownNow()
+        }
     }
 
     @Test
@@ -168,14 +383,14 @@ class ProtocolConsoleSocketControllerTest {
                     }
                 },
             )
-        controller = controller(handler)
+        controller = controller(handler, autoServerHello = false)
         val sink = RecordingFrameSink()
         controller.onOpen("session-1", sink)
         val executor = Executors.newFixedThreadPool(2)
         try {
             val helloFuture =
                 executor.submit {
-                    controller.onText("session-1", client("hello-1", hello()))
+                    controller.onText("session-1", client("hello-1", hello()), sink)
                 }
             assertTrue(helloEntered.await(1L, TimeUnit.SECONDS))
 
@@ -193,6 +408,7 @@ class ProtocolConsoleSocketControllerTest {
                     controller.onText(
                         "session-1",
                         client("lease-after-hello", LeaseAcquirePayload(requestedTtlMs = 5_000)),
+                        sink,
                     )
                 }
             assertTrue(secondFrameStarted.await(1L, TimeUnit.SECONDS))
@@ -243,7 +459,7 @@ class ProtocolConsoleSocketControllerTest {
         val sink = RecordingFrameSink()
         controller.onOpen("session-1", sink)
 
-        controller.onText("session-1", client("hello-1", hello()))
+        controller.onText("session-1", client("hello-1", hello()), sink)
 
         assertEquals(listOf(true, true, false), emitResults)
         assertTrue(sink.frames.isEmpty())
@@ -268,14 +484,14 @@ class ProtocolConsoleSocketControllerTest {
                     }
                 },
             )
-        controller = controller(handler)
+        controller = controller(handler, autoServerHello = false)
         val sink = RecordingFrameSink()
         controller.onOpen("session-b", sink)
         val executor = Executors.newSingleThreadExecutor()
         try {
             val helloFuture =
                 executor.submit {
-                    controller.onText("session-b", client("hello-b", hello()))
+                    controller.onText("session-b", client("hello-b", hello()), sink)
                 }
             assertTrue(initialSnapshotsQueued.await(1L, TimeUnit.SECONDS))
 
@@ -316,7 +532,7 @@ class ProtocolConsoleSocketControllerTest {
         val controller = controller(handler)
         val sink = RecordingFrameSink(acceptOffers = false)
         controller.onOpen("session-1", sink)
-        controller.onText("session-1", client("hello-1", hello()))
+        controller.onText("session-1", client("hello-1", hello()), sink)
 
         assertFalse(
             controller.emit(
@@ -335,7 +551,7 @@ class ProtocolConsoleSocketControllerTest {
         val controller = controller(handler)
         val sink = RecordingFrameSink()
         controller.onOpen("session-1", sink)
-        controller.onText("session-1", client("hello-1", hello()))
+        controller.onText("session-1", client("hello-1", hello()), sink)
 
         assertFalse(
             controller.emit(
@@ -355,8 +571,8 @@ class ProtocolConsoleSocketControllerTest {
         val sink = RecordingFrameSink()
         controller.onOpen("session-1", sink)
 
-        controller.onProtocolViolation("session-1", "non_text_frame")
-        controller.onClose("session-1", "peer_closed")
+        controller.onProtocolViolation("session-1", "non_text_frame", sink)
+        controller.onClose("session-1", "peer_closed", sink)
 
         assertEquals(
             listOf("session-1" to "protocol_violation:non_text_frame"),
@@ -367,29 +583,81 @@ class ProtocolConsoleSocketControllerTest {
     private fun controller(
         handler: ConsoleClientSessionHandler,
         maxBufferedServerFramesPerSession: Int = 128,
+        autoServerHello: Boolean = true,
     ): ProtocolConsoleSocketController {
         val sequence = AtomicLongForTest()
-        return ProtocolConsoleSocketController(
-            handler = handler,
+        lateinit var controller: ProtocolConsoleSocketController
+        val selectedVersions = ConcurrentHashMap<String, String>()
+        val effectiveHandler =
+            if (!autoServerHello) {
+                handler
+            } else {
+                object : ConsoleClientSessionHandler {
+                    override fun onSessionOpened(sessionId: String) {
+                        handler.onSessionOpened(sessionId)
+                    }
+
+                    override fun onProtocolSelected(
+                        sessionId: String,
+                        selectedProtocolVersion: String,
+                    ) {
+                        selectedVersions[sessionId] = selectedProtocolVersion
+                        handler.onProtocolSelected(sessionId, selectedProtocolVersion)
+                    }
+
+                    override fun onClientMessage(
+                        sessionId: String,
+                        message: ConsoleClientMessage,
+                    ) {
+                        handler.onClientMessage(sessionId, message)
+                        if (message.payload is ClientHelloPayload) {
+                            controller.emit(
+                                sessionId,
+                                serverHello(
+                                    sessionId,
+                                    checkNotNull(selectedVersions[sessionId]),
+                                ),
+                            )
+                        }
+                    }
+
+                    override fun onSessionClosed(
+                        sessionId: String,
+                        reason: String,
+                    ) {
+                        selectedVersions.remove(sessionId)
+                        handler.onSessionClosed(sessionId, reason)
+                    }
+                }
+            }
+        controller = ProtocolConsoleSocketController(
+            handler = effectiveHandler,
             codec = codec,
             messageIdFactory = { "server-test-${sequence.next()}" },
             maxBufferedServerFramesPerSession = maxBufferedServerFramesPerSession,
         )
+        return controller
     }
 
-    private fun hello(): ClientHelloPayload =
+    private fun hello(
+        supportedProtocolVersions: List<String> = listOf("1.0"),
+        authentication: AuthenticationPresentation? = null,
+    ): ClientHelloPayload =
         ClientHelloPayload(
             clientName = "web-console",
             clientVersion = "0.1.0",
-            supportedProtocolVersions = listOf("1.0"),
-            authentication = null,
+            supportedProtocolVersions = supportedProtocolVersions,
+            authentication = authentication,
         )
 
-    private fun serverHello(sessionId: String): ServerHelloPayload =
+    private fun serverHello(
+        sessionId: String,
+        selectedProtocolVersion: String = "1.0",
+    ): ServerHelloPayload =
         ServerHelloPayload(
             sessionId = sessionId,
             serverVersion = "0.1.0",
-            selectedProtocolVersion = "1.0",
+            selectedProtocolVersion = selectedProtocolVersion,
             authenticationRequired = false,
             acceptedAuthenticationSchemes = emptyList(),
         )
@@ -425,14 +693,18 @@ class ProtocolConsoleSocketControllerTest {
     private fun client(
         messageId: String,
         payload: com.durendal.droneagent.companion.console.protocol.ConsoleClientPayload,
-    ): String = codec.encodeClient(ConsoleClientMessage(messageId, payload))
+        protocolVersion: String = ConsoleProtocolModule.BOOTSTRAP_PROTOCOL_VERSION,
+    ): String = codec.encodeClient(ConsoleClientMessage(messageId, payload), protocolVersion)
 
     private inner class RecordingFrameSink(
         private val acceptOffers: Boolean = true,
     ) : ConsoleFrameSink {
         val frames = CopyOnWriteArrayList<String>()
         val closeReasons = CopyOnWriteArrayList<String>()
-        val decoded get() = frames.map(codec::decodeServer)
+        val decoded get() = decoded(ConsoleProtocolModule.PROTOCOL_VERSION)
+
+        fun decoded(protocolVersion: String) =
+            frames.map { codec.decodeServer(it, protocolVersion) }
 
         override fun offer(text: String): Boolean {
             if (acceptOffers) frames += text
@@ -452,11 +724,19 @@ class ProtocolConsoleSocketControllerTest {
         private val onMessage: (String, ConsoleClientMessage) -> Unit = { _, _ -> },
     ) : ConsoleClientSessionHandler {
         val opened = CopyOnWriteArrayList<String>()
+        val selected = CopyOnWriteArrayList<Pair<String, String>>()
         val messages = CopyOnWriteArrayList<Pair<String, ConsoleClientMessage>>()
         val closed = CopyOnWriteArrayList<Pair<String, String>>()
 
         override fun onSessionOpened(sessionId: String) {
             opened += sessionId
+        }
+
+        override fun onProtocolSelected(
+            sessionId: String,
+            selectedProtocolVersion: String,
+        ) {
+            selected += sessionId to selectedProtocolVersion
         }
 
         override fun onClientMessage(

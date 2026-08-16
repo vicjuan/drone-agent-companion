@@ -116,11 +116,14 @@ credential 與 TLS，不得為此更動凍結的 Phase-0 agent protocol。
 
 **完成判準**：codec round-trip 單元測試通過；fixtures 被兩端測試共用。
 
-**2026-08-15 實作狀態**：v1 固定 18 種 message type（client 7、server 11），
-Kotlin 與 TypeScript 共讀 30 份 canonical fixtures、manifest 與 SHA-256。codec 採方向性
-decode/encode、exact-key validation、RFC 8259 數值語意、64 KiB frame 與 16 層 nesting
-上限；client payload 不含 authority assertion。這些是 console 內部契約，未更動上游
-凍結 agent protocol。
+**2026-08-16 實作狀態**：v1.0 仍固定 18 種 message type（client 7、
+server 11），原 canonical fixtures、manifest 與 SHA-256 不變。`client_hello` 固定用
+v1.0 bootstrap envelope 廣告 `[1.1, 1.0]`，server 以每 session 最高共同版本
+回覆；v1.1 delta 新增一種 server-only `commissioning_authority_state`，不新增
+browser mutation。Kotlin 與 TypeScript 共讀 v1.1 delta fixtures/manifest；codec 繼續採
+方向性 decode/encode、exact-key validation、RFC 8259 數值語意、64 KiB frame 與
+16 層 nesting 上限。client payload 不含 authority assertion；這些是 console 內部契約，
+未更動上游凍結 agent protocol。
 
 ### S3　實作 console server（issue #3 的後半）
 
@@ -139,12 +142,15 @@ dead-man neutral。
 **完成判準**：單元測試涵蓋連線生命週期、多 client 爭用 control lease、refused
 dispatch 必有回覆，以及輸入停止／瀏覽器斷線／lease 失效時強制 neutral。
 
-**2026-08-15 實作狀態**：已建立 transport-independent `ConsoleServerCore`、Ktor
+**2026-08-16 實作狀態**：已建立 transport-independent `ConsoleServerCore`、Ktor
 transport、single-operator lease、discrete/control admission、dead-man/watchdog、neutral
 barrier 與 JSONL audit。server-owned readiness gate 在 admission、commit 與 executor 前都重驗
 adapter/connection/lock/profile；狀態失效會撤銷 lease 並 neutral。Origin gate、
 clickjacking headers、static symlink boundary、handshake ordering 與 global lease truth 均有測試。
-Ktor Android 仍未驗證。
+hardware commissioning authority 已從 runtime observer truth 分離：Core 持有 exact
+operator session/generation/monotonic TTL/immutable allowlist，v1.1 只投影個人化唯讀
+狀態，且 DJI 公開 runtime lock 全程維持 `LOCKED`。這是 JVM 契約，不是
+production DJI composition 或 G520 硬體證據；Ktor Android 仍未驗證。
 
 ### S4　console-runner：讓整套系統在 Mac 上跑起來
 

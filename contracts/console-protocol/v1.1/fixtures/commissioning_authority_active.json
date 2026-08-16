@@ -1,0 +1,14 @@
+{
+  "protocolVersion": "1.1",
+  "messageId": "fixture-authority-active-001",
+  "type": "commissioning_authority_state",
+  "payload": {
+    "stateRevision": "18",
+    "state": "active",
+    "commissioningId": "123e4567-e89b-42d3-a456-426614174000",
+    "generation": "4",
+    "allowedIntents": ["landing", "virtual_stick"],
+    "expiresInMs": 120000,
+    "reason": null
+  }
+}

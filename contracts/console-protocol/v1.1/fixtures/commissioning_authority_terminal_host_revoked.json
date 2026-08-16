@@ -1,0 +1,14 @@
+{
+  "protocolVersion": "1.1",
+  "messageId": "fixture-authority-terminal-001",
+  "type": "commissioning_authority_state",
+  "payload": {
+    "stateRevision": "19",
+    "state": "inactive",
+    "commissioningId": "123e4567-e89b-42d3-a456-426614174000",
+    "generation": "4",
+    "allowedIntents": [],
+    "expiresInMs": null,
+    "reason": "host_revoked"
+  }
+}

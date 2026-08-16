@@ -96,16 +96,19 @@ interface ConsoleSocketController {
     fun onText(
         sessionId: String,
         text: String,
+        expectedSink: ConsoleFrameSink,
     )
 
     fun onProtocolViolation(
         sessionId: String,
         reason: String,
+        expectedSink: ConsoleFrameSink,
     )
 
     fun onClose(
         sessionId: String,
         reason: String,
+        expectedSink: ConsoleFrameSink,
     )
 }
 
@@ -315,7 +318,7 @@ fun Application.installConsoleApplication(
                             val text = frame.readText()
                             if (text.toByteArray(StandardCharsets.UTF_8).size > config.maxTextFrameBytes) {
                                 closeDetail.set("text_frame_too_large")
-                                controller.onProtocolViolation(sessionId, closeDetail.get())
+                                controller.onProtocolViolation(sessionId, closeDetail.get(), sink)
                                 close(
                                     CloseReason(
                                         CloseReason.Codes.TOO_BIG,
@@ -324,7 +327,7 @@ fun Application.installConsoleApplication(
                                 )
                                 break
                             }
-                            controller.onText(sessionId, text)
+                            controller.onText(sessionId, text, sink)
                         }
 
                         is Frame.Close -> {
@@ -334,7 +337,7 @@ fun Application.installConsoleApplication(
 
                         else -> {
                             closeDetail.set("non_text_frame")
-                            controller.onProtocolViolation(sessionId, closeDetail.get())
+                            controller.onProtocolViolation(sessionId, closeDetail.get(), sink)
                             close(
                                 CloseReason(
                                     CloseReason.Codes.CANNOT_ACCEPT,
@@ -354,7 +357,9 @@ fun Application.installConsoleApplication(
                 throw failure
             } finally {
                 val closeFailure =
-                    runCatching { controller.onClose(sessionId, closeDetail.get()) }.exceptionOrNull()
+                    runCatching {
+                        controller.onClose(sessionId, closeDetail.get(), sink)
+                    }.exceptionOrNull()
                 outbound.close()
                 writer.cancelAndJoin()
                 closeFailure?.let { failure ->

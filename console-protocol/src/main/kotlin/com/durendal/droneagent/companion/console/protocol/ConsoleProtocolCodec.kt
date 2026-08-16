@@ -48,7 +48,15 @@ class ConsoleProtocolException(
 class ConsoleProtocolCodec private constructor(private val json: Json) {
     constructor() : this(STRICT_JSON)
 
-    fun inspectEnvelope(text: String): ConsoleEnvelopeHeader {
+    /** Legacy convenience API: v1.0 remains the frozen bootstrap/default inventory. */
+    fun inspectEnvelope(text: String): ConsoleEnvelopeHeader =
+        inspectEnvelope(text, ConsoleProtocolModule.PROTOCOL_VERSION)
+
+    fun inspectEnvelope(
+        text: String,
+        protocolVersion: String,
+    ): ConsoleEnvelopeHeader {
+        requireSupportedProtocolVersion(protocolVersion)
         preflightWireText(text)
         val element =
             try {
@@ -62,7 +70,7 @@ class ConsoleProtocolCodec private constructor(private val json: Json) {
             throw ConsoleProtocolException(ProtocolErrorCode.INVALID_ENVELOPE)
         }
 
-        val protocolVersion = objectValue.requiredString("protocolVersion")
+        val wireProtocolVersion = objectValue.requiredString("protocolVersion")
         val messageId = objectValue.requiredString("messageId")
         val typeName = objectValue.requiredString("type")
         if (objectValue["payload"] !is JsonObject) {
@@ -73,41 +81,87 @@ class ConsoleProtocolCodec private constructor(private val json: Json) {
         } catch (_: IllegalArgumentException) {
             throw ConsoleProtocolException(ProtocolErrorCode.INVALID_ENVELOPE)
         }
-        if (protocolVersion != ConsoleProtocolModule.PROTOCOL_VERSION) {
+        if (protocolVersion != wireProtocolVersion) {
             throw ConsoleProtocolException(ProtocolErrorCode.UNSUPPORTED_PROTOCOL_VERSION)
         }
         val type = ConsoleMessageType.fromWireName(typeName)
             ?: throw ConsoleProtocolException(ProtocolErrorCode.UNKNOWN_MESSAGE_TYPE)
-        return ConsoleEnvelopeHeader(protocolVersion, messageId, type)
+        requireMessageTypeAvailable(type, protocolVersion)
+        return ConsoleEnvelopeHeader(wireProtocolVersion, messageId, type)
     }
 
-    fun decodeClient(text: String): ConsoleClientMessage {
-        val decoded = inspectAndDecode(text, ConsoleMessageDirection.CLIENT_TO_SERVER)
+    fun decodeClient(text: String): ConsoleClientMessage =
+        decodeClient(text, ConsoleProtocolModule.PROTOCOL_VERSION)
+
+    fun decodeClient(
+        text: String,
+        protocolVersion: String,
+    ): ConsoleClientMessage {
+        val decoded =
+            inspectAndDecode(text, ConsoleMessageDirection.CLIENT_TO_SERVER, protocolVersion)
         val payload = decodeClientPayload(decoded.header.type, decoded.envelope.payload)
-        return ConsoleClientMessage(decoded.header.messageId, payload).also(::validateClient)
+        return ConsoleClientMessage(decoded.header.messageId, payload).also {
+            validateClient(it, protocolVersion)
+        }
     }
 
-    fun decodeServer(text: String): ConsoleServerMessage {
-        val decoded = inspectAndDecode(text, ConsoleMessageDirection.SERVER_TO_CLIENT)
+    fun decodeServer(text: String): ConsoleServerMessage =
+        decodeServer(text, ConsoleProtocolModule.PROTOCOL_VERSION)
+
+    fun decodeServer(
+        text: String,
+        protocolVersion: String,
+    ): ConsoleServerMessage {
+        val decoded =
+            inspectAndDecode(text, ConsoleMessageDirection.SERVER_TO_CLIENT, protocolVersion)
         val payload = decodeServerPayload(decoded.header.type, decoded.envelope.payload)
-        return ConsoleServerMessage(decoded.header.messageId, payload).also(::validateServer)
+        return ConsoleServerMessage(decoded.header.messageId, payload).also {
+            validateServer(it, protocolVersion)
+        }
     }
 
-    fun encodeClient(message: ConsoleClientMessage): String {
-        validateClient(message)
-        return encodeEnvelope(message.messageId, message.type, encodeClientPayload(message.payload))
+    fun encodeClient(message: ConsoleClientMessage): String =
+        encodeClient(message, ConsoleProtocolModule.PROTOCOL_VERSION)
+
+    fun encodeClient(
+        message: ConsoleClientMessage,
+        protocolVersion: String,
+    ): String {
+        requireSupportedProtocolVersion(protocolVersion)
+        requireMessageTypeAvailable(message.type, protocolVersion)
+        validateClient(message, protocolVersion)
+        return encodeEnvelope(
+            message.messageId,
+            message.type,
+            encodeClientPayload(message.payload),
+            protocolVersion,
+        )
     }
 
-    fun encodeServer(message: ConsoleServerMessage): String {
-        validateServer(message)
-        return encodeEnvelope(message.messageId, message.type, encodeServerPayload(message.payload))
+    fun encodeServer(message: ConsoleServerMessage): String =
+        encodeServer(message, ConsoleProtocolModule.PROTOCOL_VERSION)
+
+    fun encodeServer(
+        message: ConsoleServerMessage,
+        protocolVersion: String,
+    ): String {
+        requireSupportedProtocolVersion(protocolVersion)
+        requireMessageTypeAvailable(message.type, protocolVersion)
+        validateServer(message, protocolVersion)
+        return encodeEnvelope(
+            message.messageId,
+            message.type,
+            encodeServerPayload(message.payload),
+            protocolVersion,
+        )
     }
 
     private fun inspectAndDecode(
         text: String,
         expectedDirection: ConsoleMessageDirection,
+        protocolVersion: String,
     ): DecodedEnvelope {
-        val header = inspectEnvelope(text)
+        val header = inspectEnvelope(text, protocolVersion)
         if (header.type.direction != expectedDirection) {
             throw ConsoleProtocolException(ProtocolErrorCode.WRONG_MESSAGE_DIRECTION)
         }
@@ -157,6 +211,8 @@ class ConsoleProtocolCodec private constructor(private val json: Json) {
                 ConsoleMessageType.CONTROL_ACK -> json.decodeFromJsonElement<ControlAckPayload>(normalized)
                 ConsoleMessageType.SAFETY_EVENT -> json.decodeFromJsonElement<SafetyEventPayload>(normalized)
                 ConsoleMessageType.PROTOCOL_ERROR -> json.decodeFromJsonElement<ProtocolErrorPayload>(normalized)
+                ConsoleMessageType.COMMISSIONING_AUTHORITY_STATE ->
+                    json.decodeFromJsonElement<CommissioningAuthorityStatePayload>(normalized)
                 else -> throw ConsoleProtocolException(ProtocolErrorCode.WRONG_MESSAGE_DIRECTION)
             }
         }
@@ -186,17 +242,19 @@ class ConsoleProtocolCodec private constructor(private val json: Json) {
             is ControlAckPayload -> json.encodeToJsonElement(payload)
             is SafetyEventPayload -> json.encodeToJsonElement(payload)
             is ProtocolErrorPayload -> json.encodeToJsonElement(payload)
+            is CommissioningAuthorityStatePayload -> json.encodeToJsonElement(payload)
         }
 
     private fun encodeEnvelope(
         messageId: String,
         type: ConsoleMessageType,
         payload: JsonElement,
+        protocolVersion: String,
     ): String {
         val encoded =
             json.encodeToString(
                 WireEnvelope(
-                    protocolVersion = ConsoleProtocolModule.PROTOCOL_VERSION,
+                    protocolVersion = protocolVersion,
                     messageId = messageId,
                     type = type.wireName,
                     payload = payload as JsonObject,
@@ -354,19 +412,40 @@ class ConsoleProtocolCodec private constructor(private val json: Json) {
         return false
     }
 
-    private fun validateClient(message: ConsoleClientMessage) {
+    private fun validateClient(
+        message: ConsoleClientMessage,
+        protocolVersion: String,
+    ) {
         try {
-            ConsoleMessageValidator.validate(message)
+            ConsoleMessageValidator.validate(message, protocolVersion)
         } catch (_: Exception) {
             throw ConsoleProtocolException(ProtocolErrorCode.INVALID_PAYLOAD)
         }
     }
 
-    private fun validateServer(message: ConsoleServerMessage) {
+    private fun validateServer(
+        message: ConsoleServerMessage,
+        protocolVersion: String,
+    ) {
         try {
-            ConsoleMessageValidator.validate(message)
+            ConsoleMessageValidator.validate(message, protocolVersion)
         } catch (_: Exception) {
             throw ConsoleProtocolException(ProtocolErrorCode.INVALID_PAYLOAD)
+        }
+    }
+
+    private fun requireSupportedProtocolVersion(protocolVersion: String) {
+        if (!ConsoleProtocolModule.isSupportedProtocolVersion(protocolVersion)) {
+            throw ConsoleProtocolException(ProtocolErrorCode.UNSUPPORTED_PROTOCOL_VERSION)
+        }
+    }
+
+    private fun requireMessageTypeAvailable(
+        type: ConsoleMessageType,
+        protocolVersion: String,
+    ) {
+        if (!type.isAvailableIn(protocolVersion)) {
+            throw ConsoleProtocolException(ProtocolErrorCode.UNKNOWN_MESSAGE_TYPE)
         }
     }
 
@@ -408,6 +487,7 @@ class ConsoleProtocolCodec private constructor(private val json: Json) {
                 ConsoleMessageType.CONTROL_NEUTRAL to setOf("inputSequence"),
                 ConsoleMessageType.CONTROL_ACK to setOf("inputSequence"),
                 ConsoleMessageType.SAFETY_EVENT to setOf("lastInputSequence"),
+                ConsoleMessageType.COMMISSIONING_AUTHORITY_STATE to setOf("expiresInMs"),
             )
 
         val ENVELOPE_FIELDS: Set<String> =

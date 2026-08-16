@@ -9,20 +9,43 @@ object ConsoleMessageValidator {
     private val capabilityIdPattern = Regex("^[a-z][a-z0-9_]*$")
     private val sha256Pattern = Regex("^[0-9a-f]{64}$")
     private val isoDatePattern = Regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+    private val canonicalDecimalPattern = Regex("^(?:0|[1-9][0-9]{0,18})$")
+    private val uuidV4Pattern =
+        Regex("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
-    fun validate(message: ConsoleClientMessage) {
+    fun validate(message: ConsoleClientMessage) =
+        validate(message, ConsoleProtocolModule.PROTOCOL_VERSION)
+
+    fun validate(
+        message: ConsoleClientMessage,
+        protocolVersion: String,
+    ) {
         requireId(message.messageId)
-        validate(message.payload)
+        validate(message.payload, protocolVersion)
     }
 
-    fun validate(message: ConsoleServerMessage) {
+    fun validate(message: ConsoleServerMessage) =
+        validate(message, ConsoleProtocolModule.PROTOCOL_VERSION)
+
+    fun validate(
+        message: ConsoleServerMessage,
+        protocolVersion: String,
+    ) {
         requireId(message.messageId)
-        validate(message.payload)
+        validate(message.payload, protocolVersion)
     }
 
-    fun validate(payload: ConsoleClientPayload) {
+    fun validate(payload: ConsoleClientPayload) =
+        validate(payload, ConsoleProtocolModule.PROTOCOL_VERSION)
+
+    fun validate(
+        payload: ConsoleClientPayload,
+        protocolVersion: String,
+    ) {
+        requirePayloadAvailable(payload.messageType(), protocolVersion)
         when (payload) {
             is ClientHelloPayload -> {
+                require(protocolVersion == ConsoleProtocolModule.BOOTSTRAP_PROTOCOL_VERSION)
                 requireName(payload.clientName)
                 requireName(payload.clientVersion)
                 require(
@@ -75,12 +98,19 @@ object ConsoleMessageValidator {
         }
     }
 
-    fun validate(payload: ConsoleServerPayload) {
+    fun validate(payload: ConsoleServerPayload) =
+        validate(payload, ConsoleProtocolModule.PROTOCOL_VERSION)
+
+    fun validate(
+        payload: ConsoleServerPayload,
+        protocolVersion: String,
+    ) {
+        requirePayloadAvailable(payload.messageType(), protocolVersion)
         when (payload) {
             is ServerHelloPayload -> {
                 requireId(payload.sessionId)
                 requireName(payload.serverVersion)
-                require(payload.selectedProtocolVersion == ConsoleProtocolModule.PROTOCOL_VERSION)
+                require(payload.selectedProtocolVersion == protocolVersion)
                 require(
                     payload.acceptedAuthenticationSchemes.size <=
                         ConsoleProtocolModule.MAX_NEGOTIATION_VALUES,
@@ -94,6 +124,7 @@ object ConsoleMessageValidator {
             }
 
             is RuntimeStatePayload -> Unit
+            is CommissioningAuthorityStatePayload -> validateCommissioningAuthorityState(payload)
             is TelemetryPayload -> {
                 requirePositiveSafeInteger(payload.sequence)
                 payload.batteryPercent?.let { require(it in 0..100) }
@@ -204,6 +235,59 @@ object ConsoleMessageValidator {
     }
 
     fun requireMessageId(value: String) = requireId(value)
+
+    private fun validateCommissioningAuthorityState(payload: CommissioningAuthorityStatePayload) {
+        val stateRevision = requireCanonicalDecimal(payload.stateRevision)
+        val generation = requireCanonicalDecimal(payload.generation)
+        require(payload.allowedIntents == payload.allowedIntents.distinct().sortedBy { it.ordinal })
+
+        when (payload.state) {
+            CommissioningAuthorityState.ACTIVE -> {
+                require(stateRevision >= 1)
+                requireUuidV4(payload.commissioningId)
+                require(generation >= 1)
+                require(payload.allowedIntents.isNotEmpty())
+                val expiresInMs = requireNotNull(payload.expiresInMs)
+                require(
+                    expiresInMs in
+                        ConsoleProtocolModule.MIN_COMMISSIONING_AUTHORITY_REMAINING_TTL_MS..
+                        ConsoleProtocolModule.MAX_COMMISSIONING_AUTHORITY_REMAINING_TTL_MS,
+                )
+                require(payload.reason == null)
+            }
+
+            CommissioningAuthorityState.INACTIVE -> {
+                require(payload.allowedIntents.isEmpty())
+                require(payload.expiresInMs == null)
+                if (payload.reason == CommissioningAuthorityReason.NO_ACTIVE_SESSION) {
+                    require(payload.commissioningId == null)
+                    require(generation == 0L)
+                } else {
+                    require(stateRevision >= 1)
+                    requireUuidV4(payload.commissioningId)
+                    require(generation >= 1)
+                    require(payload.reason != null)
+                }
+            }
+        }
+    }
+
+    private fun requirePayloadAvailable(
+        type: ConsoleMessageType,
+        protocolVersion: String,
+    ) {
+        require(ConsoleProtocolModule.isSupportedProtocolVersion(protocolVersion))
+        require(type.isAvailableIn(protocolVersion))
+    }
+
+    private fun requireCanonicalDecimal(value: String): Long {
+        require(canonicalDecimalPattern.matches(value))
+        return requireNotNull(value.toLongOrNull())
+    }
+
+    private fun requireUuidV4(value: String?) {
+        require(value != null && uuidV4Pattern.matches(value))
+    }
 
     private fun requireLeaseTtl(value: Int) {
         require(

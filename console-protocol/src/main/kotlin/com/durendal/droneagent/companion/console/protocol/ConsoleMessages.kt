@@ -11,6 +11,7 @@ enum class ConsoleMessageDirection {
 enum class ConsoleMessageType(
     val wireName: String,
     val direction: ConsoleMessageDirection,
+    val minimumProtocolVersion: String = ConsoleProtocolModule.PROTOCOL_VERSION,
 ) {
     CLIENT_HELLO("client_hello", ConsoleMessageDirection.CLIENT_TO_SERVER),
     SERVER_HELLO("server_hello", ConsoleMessageDirection.SERVER_TO_CLIENT),
@@ -30,7 +31,20 @@ enum class ConsoleMessageType(
     CONTROL_ACK("control_ack", ConsoleMessageDirection.SERVER_TO_CLIENT),
     SAFETY_EVENT("safety_event", ConsoleMessageDirection.SERVER_TO_CLIENT),
     PROTOCOL_ERROR("protocol_error", ConsoleMessageDirection.SERVER_TO_CLIENT),
+    COMMISSIONING_AUTHORITY_STATE(
+        "commissioning_authority_state",
+        ConsoleMessageDirection.SERVER_TO_CLIENT,
+        ConsoleProtocolModule.COMMISSIONING_AUTHORITY_PROTOCOL_VERSION,
+    ),
     ;
+
+    fun isAvailableIn(protocolVersion: String): Boolean =
+        when (protocolVersion) {
+            ConsoleProtocolModule.PROTOCOL_VERSION ->
+                minimumProtocolVersion == ConsoleProtocolModule.PROTOCOL_VERSION
+            ConsoleProtocolModule.COMMISSIONING_AUTHORITY_PROTOCOL_VERSION -> true
+            else -> false
+        }
 
     companion object {
         private val byWireName = entries.associateBy(ConsoleMessageType::wireName)
@@ -126,6 +140,52 @@ data class RuntimeStatePayload(
     val operatingProfile: OperatingProfile,
 ) : ConsoleServerPayload {
     override fun messageType() = ConsoleMessageType.RUNTIME_STATE
+}
+
+@Serializable
+enum class CommissioningAuthorityState {
+    @SerialName("inactive") INACTIVE,
+    @SerialName("active") ACTIVE,
+}
+
+@Serializable
+enum class CommissioningIntent {
+    @SerialName("takeoff") TAKEOFF,
+    @SerialName("landing") LANDING,
+    @SerialName("return_to_home") RETURN_TO_HOME,
+    @SerialName("virtual_stick") VIRTUAL_STICK,
+}
+
+@Serializable
+enum class CommissioningAuthorityReason {
+    @SerialName("no_active_session") NO_ACTIVE_SESSION,
+    @SerialName("host_revoked") HOST_REVOKED,
+    @SerialName("ttl_expired") TTL_EXPIRED,
+    @SerialName("operator_disconnected") OPERATOR_DISCONNECTED,
+    @SerialName("observation_lost") OBSERVATION_LOST,
+    @SerialName("runtime_state_changed") RUNTIME_STATE_CHANGED,
+    @SerialName("server_closed") SERVER_CLOSED,
+    @SerialName("audit_unavailable") AUDIT_UNAVAILABLE,
+    @SerialName("deadline_unavailable") DEADLINE_UNAVAILABLE,
+}
+
+/**
+ * Server-owned, recipient-relative observation of a commissioning grant.
+ *
+ * Decimal counters are strings so their exact Long identity survives JavaScript decoding. This
+ * payload is never accepted from a client and does not replace the public runtime lock truth.
+ */
+@Serializable
+data class CommissioningAuthorityStatePayload(
+    val stateRevision: String,
+    val state: CommissioningAuthorityState,
+    val commissioningId: String?,
+    val generation: String,
+    val allowedIntents: List<CommissioningIntent>,
+    val expiresInMs: Long?,
+    val reason: CommissioningAuthorityReason?,
+) : ConsoleServerPayload {
+    override fun messageType() = ConsoleMessageType.COMMISSIONING_AUTHORITY_STATE
 }
 
 @Serializable

@@ -5,9 +5,11 @@ import com.durendal.droneagent.companion.console.protocol.ConsoleClientMessage
 import com.durendal.droneagent.companion.console.protocol.ConsoleMessageValidator
 import com.durendal.droneagent.companion.console.protocol.ConsoleProtocolCodec
 import com.durendal.droneagent.companion.console.protocol.ConsoleProtocolException
+import com.durendal.droneagent.companion.console.protocol.ConsoleProtocolModule
 import com.durendal.droneagent.companion.console.protocol.ConsoleServerMessage
 import com.durendal.droneagent.companion.console.protocol.ConsoleServerPayload
 import com.durendal.droneagent.companion.console.protocol.ProtocolErrorCode
+import com.durendal.droneagent.companion.console.protocol.ServerHelloPayload
 import java.util.concurrent.atomic.AtomicLong
 import java.util.ArrayDeque
 
@@ -18,6 +20,12 @@ import java.util.ArrayDeque
  */
 interface ConsoleClientSessionHandler {
     fun onSessionOpened(sessionId: String)
+
+    /** Transport-owned negotiation result; Core/session authority remains version-neutral. */
+    fun onProtocolSelected(
+        sessionId: String,
+        selectedProtocolVersion: String,
+    ) = Unit
 
     fun onClientMessage(
         sessionId: String,
@@ -70,12 +78,13 @@ class ProtocolConsoleSocketController(
             sink.close("invalid_server_session_id")
             return
         }
+        val transport = SessionTransport(sink)
         val registered =
             synchronized(lock) {
                 if (sessions.containsKey(sessionId)) {
                     false
                 } else {
-                    sessions[sessionId] = SessionTransport(sink)
+                    sessions[sessionId] = transport
                     true
                 }
             }
@@ -84,28 +93,48 @@ class ProtocolConsoleSocketController(
             return
         }
         try {
-            handler.onSessionOpened(sessionId)
+            synchronized(transport.clientFrameLock) {
+                if (synchronized(lock) { sessions[sessionId] !== transport || transport.closing }) {
+                    return
+                }
+                handler.onSessionOpened(sessionId)
+            }
         } catch (_: Exception) {
-            failSession(sessionId, relatedMessageId = null)
+            failSession(sessionId, transport, relatedMessageId = null)
         }
     }
 
     override fun onText(
         sessionId: String,
         text: String,
+        expectedSink: ConsoleFrameSink,
     ) {
-        val session = synchronized(lock) { sessions[sessionId] } ?: return
+        val session =
+            synchronized(lock) {
+                sessions[sessionId]?.takeIf { it.sink === expectedSink }
+            } ?: return
         // The Ktor receive loop is sequential today, but the controller is also a public
         // transport boundary. Serialize frames per session so a second caller cannot dispatch
         // authority-bearing input while the first hello is still initializing the core.
         synchronized(session.clientFrameLock) {
-            if (synchronized(lock) { sessions[sessionId] !== session }) return
+            val decodeProtocolVersion =
+                synchronized(lock) {
+                    val current = sessions[sessionId]
+                    if (current !== session || current.closing) return
+                    if (current.phase == HandshakePhase.READY) {
+                        checkNotNull(current.selectedProtocolVersion)
+                    } else {
+                        ConsoleProtocolModule.BOOTSTRAP_PROTOCOL_VERSION
+                    }
+                }
             val message =
                 try {
-                    codec.decodeClient(text)
+                    codec.decodeClient(text, decodeProtocolVersion)
                 } catch (failure: ConsoleProtocolException) {
                     val relatedMessageId =
-                        runCatching { codec.inspectEnvelope(text).messageId }.getOrNull()
+                        runCatching {
+                            codec.inspectEnvelope(text, decodeProtocolVersion).messageId
+                        }.getOrNull()
                     sendProtocolError(sessionId, session, failure.code, relatedMessageId)
                     return
                 } catch (_: Exception) {
@@ -118,10 +147,14 @@ class ProtocolConsoleSocketController(
                     return
                 }
 
+            var selectedDuringHello: String? = null
+            var closeAfterStateError = false
             val stateError =
                 synchronized(lock) {
                     val current = sessions[sessionId] ?: return
                     when {
+                        current !== session || current.closing -> return
+
                         current.phase == HandshakePhase.WAITING && message.payload !is ClientHelloPayload ->
                             ProtocolErrorCode.HANDSHAKE_REQUIRED
 
@@ -132,14 +165,27 @@ class ProtocolConsoleSocketController(
                         // other callers wait on clientFrameLock. Never let it cross the hello gate.
                         current.phase == HandshakePhase.HANDSHAKING ->
                             if (message.payload is ClientHelloPayload) {
+                                closeAfterStateError = true
                                 ProtocolErrorCode.UNEXPECTED_MESSAGE
                             } else {
+                                closeAfterStateError = true
                                 ProtocolErrorCode.HANDSHAKE_REQUIRED
                             }
 
                         current.phase == HandshakePhase.WAITING -> {
-                            current.phase = HandshakePhase.HANDSHAKING
-                            null
+                            val selected =
+                                ConsoleProtocolModule.selectProtocolVersion(
+                                    (message.payload as ClientHelloPayload)
+                                        .supportedProtocolVersions,
+                                )
+                            if (selected == null) {
+                                ProtocolErrorCode.UNSUPPORTED_PROTOCOL_VERSION
+                            } else {
+                                current.selectedProtocolVersion = selected
+                                current.phase = HandshakePhase.HANDSHAKING
+                                selectedDuringHello = selected
+                                null
+                            }
                         }
 
                         else -> null
@@ -147,19 +193,39 @@ class ProtocolConsoleSocketController(
                 }
             if (stateError != null) {
                 sendProtocolError(sessionId, session, stateError, message.messageId)
+                if (closeAfterStateError ||
+                    stateError == ProtocolErrorCode.UNSUPPORTED_PROTOCOL_VERSION
+                ) {
+                    terminateSession(
+                        sessionId,
+                        if (closeAfterStateError) {
+                            "handshake_state_violation"
+                        } else {
+                            "unsupported_protocol_version"
+                        },
+                        expected = session,
+                    )
+                }
                 return
             }
 
             try {
+                selectedDuringHello?.let { selected ->
+                    handler.onProtocolSelected(sessionId, selected)
+                }
                 handler.onClientMessage(sessionId, message)
             } catch (failure: ConsoleSessionProtocolException) {
                 sendProtocolError(sessionId, session, failure.code, message.messageId)
                 if (failure.closeSession) {
-                    terminateSession(sessionId, "session_rejected:${failure.code.wireName}")
+                    terminateSession(
+                        sessionId,
+                        "session_rejected:${failure.code.wireName}",
+                        expected = session,
+                    )
                 }
                 return
             } catch (_: Exception) {
-                failSession(sessionId, message.messageId)
+                failSession(sessionId, session, message.messageId)
                 return
             }
 
@@ -172,15 +238,30 @@ class ProtocolConsoleSocketController(
     override fun onProtocolViolation(
         sessionId: String,
         reason: String,
+        expectedSink: ConsoleFrameSink,
     ) {
-        terminateSession(sessionId, "protocol_violation:$reason")
+        val expected =
+            synchronized(lock) {
+                sessions[sessionId]?.takeIf { it.sink === expectedSink }
+            } ?: return
+        terminateSession(sessionId, "protocol_violation:$reason", expected = expected)
     }
 
     override fun onClose(
         sessionId: String,
         reason: String,
+        expectedSink: ConsoleFrameSink,
     ) {
-        terminateSession(sessionId, reason, requestTransportClose = false)
+        val expected =
+            synchronized(lock) {
+                sessions[sessionId]?.takeIf { it.sink === expectedSink }
+            } ?: return
+        terminateSession(
+            sessionId,
+            reason,
+            requestTransportClose = false,
+            expected = expected,
+        )
     }
 
     /**
@@ -193,16 +274,25 @@ class ProtocolConsoleSocketController(
         targetSessionId: String?,
         payload: ConsoleServerPayload,
     ): Boolean {
+        val isServerHello = payload is ServerHelloPayload
+        if (isServerHello && targetSessionId == null) return false
         val targets =
             synchronized(lock) {
                 if (targetSessionId == null) {
                     sessions
-                        .filterValues { it.phase != HandshakePhase.WAITING }
-                        .map { (sessionId, transport) -> sessionId to transport }
+                        .filterValues {
+                            it.phase != HandshakePhase.WAITING && !it.closing
+                        }
+                        .mapNotNull { (sessionId, transport) ->
+                            transport.selectedProtocolVersion
+                                ?.let { EncodeTarget(sessionId, transport, it) }
+                        }
                 } else {
                     val transport = sessions[targetSessionId]
                     if (transport?.phase != null && transport.phase != HandshakePhase.WAITING) {
-                        listOf(targetSessionId to transport)
+                        transport.selectedProtocolVersion
+                            ?.let { listOf(EncodeTarget(targetSessionId, transport, it)) }
+                            ?: emptyList()
                     } else {
                         emptyList()
                     }
@@ -210,28 +300,32 @@ class ProtocolConsoleSocketController(
             }
         if (targets.isEmpty()) return targetSessionId == null
 
-        val encoded =
-            runCatching {
-                codec.encodeServer(
-                    ConsoleServerMessage(
-                        messageId = messageIdFactory(),
-                        payload = payload,
-                    ),
-                )
-            }.getOrElse {
-                targets.forEach { (sessionId, _) ->
-                    terminateSession(sessionId, "invalid_server_event")
-                }
-                return false
-            }
+        val message =
+            ConsoleServerMessage(
+                messageId = messageIdFactory(),
+                payload = payload,
+            )
 
         var allDelivered = true
-        targets.forEach { (sessionId, transport) ->
+        targets.forEach { target ->
+            val encoded =
+                runCatching {
+                    codec.encodeServer(message, target.protocolVersion)
+                }.getOrElse {
+                    terminateSession(
+                        target.sessionId,
+                        "invalid_server_event",
+                        expected = target.transport,
+                    )
+                    allDelivered = false
+                    return@forEach
+                }
             if (!enqueueAndMaybeDrain(
-                    sessionId,
-                    transport,
+                    target.sessionId,
+                    target.transport,
                     encoded,
                     isBroadcast = targetSessionId == null,
+                    isServerHello = isServerHello,
                 )
             ) {
                 allDelivered = false
@@ -245,6 +339,7 @@ class ProtocolConsoleSocketController(
         expected: SessionTransport,
         encoded: String,
         isBroadcast: Boolean,
+        isServerHello: Boolean,
     ): Boolean {
         val enqueueResult =
             synchronized(lock) {
@@ -252,16 +347,29 @@ class ProtocolConsoleSocketController(
                 when {
                     current !== expected -> EnqueueResult.SESSION_GONE
                     current.phase == HandshakePhase.WAITING -> EnqueueResult.NOT_READY
-                    current.serverFrames.size + current.handshakeBroadcastFrames.size >=
+                    current.serverFrames.size + current.handshakePendingFrames.size >=
                         maxBufferedServerFramesPerSession ->
                         EnqueueResult.OVERFLOW
 
-                    else -> {
-                        if (current.phase == HandshakePhase.HANDSHAKING && isBroadcast) {
-                            current.handshakeBroadcastFrames.addLast(encoded)
+                    current.phase == HandshakePhase.HANDSHAKING -> {
+                        if (isServerHello) {
+                            if (isBroadcast || current.serverHelloQueued) {
+                                EnqueueResult.INVALID_EVENT
+                            } else {
+                                current.serverFrames.addLast(encoded)
+                                current.serverHelloQueued = true
+                                EnqueueResult.QUEUED
+                            }
                         } else {
-                            current.serverFrames.addLast(encoded)
+                            current.handshakePendingFrames.addLast(encoded)
+                            EnqueueResult.QUEUED
                         }
+                    }
+
+                    isServerHello -> EnqueueResult.INVALID_EVENT
+
+                    else -> {
+                        current.serverFrames.addLast(encoded)
                         if (current.phase == HandshakePhase.READY && !current.draining) {
                             current.draining = true
                             EnqueueResult.DRAIN
@@ -275,7 +383,11 @@ class ProtocolConsoleSocketController(
             EnqueueResult.QUEUED -> true
             EnqueueResult.DRAIN -> drainSession(sessionId, expected)
             EnqueueResult.OVERFLOW -> {
-                terminateSession(sessionId, "outbound_backpressure")
+                terminateSession(sessionId, "outbound_backpressure", expected = expected)
+                false
+            }
+            EnqueueResult.INVALID_EVENT -> {
+                terminateSession(sessionId, "invalid_server_event", expected = expected)
                 false
             }
             EnqueueResult.NOT_READY,
@@ -288,26 +400,35 @@ class ProtocolConsoleSocketController(
         sessionId: String,
         expected: SessionTransport,
     ) {
-        val shouldDrain =
+        val readyResult =
             synchronized(lock) {
                 val current = sessions[sessionId]
                 if (current !== expected || current.phase != HandshakePhase.HANDSHAKING) {
-                    false
+                    ReadyResult.SESSION_GONE
+                } else if (!current.serverHelloQueued || current.serverFrames.isEmpty()) {
+                    ReadyResult.MISSING_SERVER_HELLO
                 } else {
                     current.phase = HandshakePhase.READY
                     // Initial directed hello/snapshot output is protocol-critical. Ambient
-                    // telemetry/health broadcasts that raced the hello handler follow it.
-                    current.serverFrames.addAll(current.handshakeBroadcastFrames)
-                    current.handshakeBroadcastFrames.clear()
+                    // broadcasts and any authority event that raced it follow server_hello.
+                    current.serverFrames.addAll(current.handshakePendingFrames)
+                    current.handshakePendingFrames.clear()
                     if (current.serverFrames.isNotEmpty() && !current.draining) {
                         current.draining = true
-                        true
+                        ReadyResult.DRAIN
                     } else {
-                        false
+                        ReadyResult.READY
                     }
                 }
             }
-        if (shouldDrain) drainSession(sessionId, expected)
+        when (readyResult) {
+            ReadyResult.DRAIN -> drainSession(sessionId, expected)
+            ReadyResult.MISSING_SERVER_HELLO ->
+                terminateSession(sessionId, "missing_server_hello", expected = expected)
+            ReadyResult.READY,
+            ReadyResult.SESSION_GONE,
+            -> Unit
+        }
     }
 
     private fun drainSession(
@@ -328,9 +449,9 @@ class ProtocolConsoleSocketController(
                         return true
                     }
                     current.serverFrames.removeFirst()
-                }
+            }
             if (!expected.sink.offer(encoded)) {
-                terminateSession(sessionId, "outbound_backpressure")
+                terminateSession(sessionId, "outbound_backpressure", expected = expected)
                 return false
             }
         }
@@ -338,16 +459,18 @@ class ProtocolConsoleSocketController(
 
     private fun failSession(
         sessionId: String,
+        expected: SessionTransport,
         relatedMessageId: String?,
     ) {
-        val session = synchronized(lock) { sessions[sessionId] } ?: return
+        val session = synchronized(lock) { sessions[sessionId] }
+        if (session !== expected) return
         sendProtocolError(
             sessionId,
             session,
             ProtocolErrorCode.SERVER_UNAVAILABLE,
             relatedMessageId,
         )
-        terminateSession(sessionId, "server_unavailable")
+        terminateSession(sessionId, "server_unavailable", expected = session)
     }
 
     private fun sendProtocolError(
@@ -356,6 +479,20 @@ class ProtocolConsoleSocketController(
         code: ProtocolErrorCode,
         relatedMessageId: String?,
     ) {
+        val protocolVersion =
+            synchronized(lock) {
+                val current = sessions[sessionId]
+                if (current !== session || current.closing) return
+                when (current.phase) {
+                    // Failed initialization never reaches READY, so its sanitized error remains
+                    // on the frozen bootstrap envelope. A successful initialization still drains
+                    // server_hello before every buffered non-error frame.
+                    HandshakePhase.WAITING,
+                    HandshakePhase.HANDSHAKING,
+                    -> ConsoleProtocolModule.BOOTSTRAP_PROTOCOL_VERSION
+                    HandshakePhase.READY -> checkNotNull(current.selectedProtocolVersion)
+                }
+            }
         val payload = ConsoleProtocolException(code).toPayload(relatedMessageId)
         val encoded =
             runCatching {
@@ -364,27 +501,50 @@ class ProtocolConsoleSocketController(
                         messageId = messageIdFactory(),
                         payload = payload,
                     ),
+                    protocolVersion,
                 )
             }.getOrElse {
-                terminateSession(sessionId, "protocol_error_encode_failure")
+                terminateSession(
+                    sessionId,
+                    "protocol_error_encode_failure",
+                    expected = session,
+                )
                 return
             }
         if (!session.sink.offer(encoded)) {
-            terminateSession(sessionId, "outbound_backpressure")
+            terminateSession(sessionId, "outbound_backpressure", expected = session)
         }
     }
 
     private fun terminateSession(
         sessionId: String,
         reason: String,
+        expected: SessionTransport,
         requestTransportClose: Boolean = true,
     ) {
-        val removed = synchronized(lock) { sessions.remove(sessionId) } ?: return
+        val closing =
+            synchronized(lock) {
+                val current = sessions[sessionId] ?: return
+                if (current !== expected || current.closing) return
+                current.closing = true
+                current
+            }
         try {
-            handler.onSessionClosed(sessionId, reason)
+            // Keep the closing transport as an exact-identity tombstone until any in-flight
+            // client callback has returned. This prevents a same-id replacement from being
+            // opened and then mutated by the tail of the old hello/message handler.
+            synchronized(closing.clientFrameLock) {
+                try {
+                    handler.onSessionClosed(sessionId, reason)
+                } finally {
+                    synchronized(lock) {
+                        if (sessions[sessionId] === closing) sessions.remove(sessionId)
+                    }
+                }
+            }
         } finally {
             if (requestTransportClose) {
-                removed.sink.close(reason)
+                closing.sink.close(reason)
             }
         }
     }
@@ -393,9 +553,18 @@ class ProtocolConsoleSocketController(
         val sink: ConsoleFrameSink,
         val clientFrameLock: Any = Any(),
         var phase: HandshakePhase = HandshakePhase.WAITING,
+        var selectedProtocolVersion: String? = null,
+        var serverHelloQueued: Boolean = false,
         val serverFrames: ArrayDeque<String> = ArrayDeque(),
-        val handshakeBroadcastFrames: ArrayDeque<String> = ArrayDeque(),
+        val handshakePendingFrames: ArrayDeque<String> = ArrayDeque(),
         var draining: Boolean = false,
+        var closing: Boolean = false,
+    )
+
+    private data class EncodeTarget(
+        val sessionId: String,
+        val transport: SessionTransport,
+        val protocolVersion: String,
     )
 
     private enum class HandshakePhase {
@@ -408,7 +577,15 @@ class ProtocolConsoleSocketController(
         QUEUED,
         DRAIN,
         OVERFLOW,
+        INVALID_EVENT,
         NOT_READY,
+        SESSION_GONE,
+    }
+
+    private enum class ReadyResult {
+        READY,
+        DRAIN,
+        MISSING_SERVER_HELLO,
         SESSION_GONE,
     }
 

@@ -6,12 +6,17 @@ import com.durendal.droneagent.companion.console.protocol.AircraftConnectionStat
 import com.durendal.droneagent.companion.console.protocol.CapabilityEvidenceStatus
 import com.durendal.droneagent.companion.console.protocol.CapabilitySnapshotPayload
 import com.durendal.droneagent.companion.console.protocol.ClientHelloPayload
+import com.durendal.droneagent.companion.console.protocol.CommissioningAuthorityReason
+import com.durendal.droneagent.companion.console.protocol.CommissioningAuthorityState
+import com.durendal.droneagent.companion.console.protocol.CommissioningAuthorityStatePayload
+import com.durendal.droneagent.companion.console.protocol.CommissioningIntent
 import com.durendal.droneagent.companion.console.protocol.CommandAckPayload
 import com.durendal.droneagent.companion.console.protocol.CommandDecision
 import com.durendal.droneagent.companion.console.protocol.ConsoleClientMessage
 import com.durendal.droneagent.companion.console.protocol.ConsoleClientPayload
 import com.durendal.droneagent.companion.console.protocol.ConsoleMessageType
 import com.durendal.droneagent.companion.console.protocol.ConsoleProtocolCodec
+import com.durendal.droneagent.companion.console.protocol.ConsoleProtocolModule
 import com.durendal.droneagent.companion.console.protocol.ConsoleServerMessage
 import com.durendal.droneagent.companion.console.protocol.ControlAckPayload
 import com.durendal.droneagent.companion.console.protocol.ControlAckStatus
@@ -44,11 +49,18 @@ import com.durendal.droneagent.companion.console.server.ConsoleAuditSink
 import com.durendal.droneagent.companion.console.server.ConsoleCommandAdmission
 import com.durendal.droneagent.companion.console.server.ConsoleCommandExecutor
 import com.durendal.droneagent.companion.console.server.ConsoleCommissioningLifecycle
+import com.durendal.droneagent.companion.console.server.ConsoleCommissioningRevokeDecision
+import com.durendal.droneagent.companion.console.server.ConsoleCommissioningSessionView
+import com.durendal.droneagent.companion.console.server.ConsoleCommissioningAuthorityReason
+import com.durendal.droneagent.companion.console.server.ConsoleCommissioningAuthorityState
+import com.durendal.droneagent.companion.console.server.ConsoleCommissioningAuthorityStatus
+import com.durendal.droneagent.companion.console.server.ConsoleCoreEvent
 import com.durendal.droneagent.companion.console.server.ConsoleDeadlineScheduler
 import com.durendal.droneagent.companion.console.server.ConsoleEpochClock
 import com.durendal.droneagent.companion.console.server.ConsoleExecutionResult
 import com.durendal.droneagent.companion.console.server.ConsoleMonotonicClock
 import com.durendal.droneagent.companion.console.server.ConsoleScheduledTask
+import com.durendal.droneagent.companion.console.server.ConsoleSession
 import com.durendal.droneagent.companion.console.server.ConsoleSafetyTrigger
 import com.durendal.droneagent.companion.console.server.ConsoleServerCore
 import com.durendal.droneagent.companion.console.server.ConsoleServerCoreConfig
@@ -73,6 +85,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -307,14 +320,206 @@ class HardwareCommissioningWebSocketIntegrationTest {
         }
     }
 
+    @Test
+    fun `v11 authority view is exact-recipient only while v10 remains unchanged`() {
+        val webRoot = Files.createTempDirectory("commissioning-authority-ws-e2e")
+        Files.writeString(webRoot.resolve("index.html"), "<html>authority fixture</html>")
+        val fixture = RuntimeFixture()
+        try {
+            testApplication {
+                application {
+                    installConsoleApplication(
+                        ConsoleServerConfig(
+                            bindHost = "127.0.0.1",
+                            bindPort = 0,
+                            webRoot = webRoot,
+                            allowedBrowserOrigin = TEST_BROWSER_ORIGIN,
+                        ),
+                        fixture.controller,
+                        sessionIdFactory = fixture::nextSessionId,
+                    )
+                }
+                val socketClient = createClient { install(WebSockets) }
+                socketClient.webSocket(
+                    ConsoleRoutes.WEBSOCKET,
+                    request = { header(HttpHeaders.Origin, TEST_BROWSER_ORIGIN) },
+                ) {
+                    val legacySocket = this
+                    legacySocket.sendClient("hello-legacy", hello(listOf("1.0")))
+                    val legacyInitial =
+                        legacySocket.receiveUntil("1.0") {
+                            it.type == ConsoleMessageType.LEASE_STATE
+                        }
+                    assertEquals(
+                        "1.0",
+                        legacyInitial.payload<ServerHelloPayload>().selectedProtocolVersion,
+                    )
+                    assertTrue(
+                        legacyInitial.none {
+                            it.type == ConsoleMessageType.COMMISSIONING_AUTHORITY_STATE
+                        },
+                    )
+
+                    socketClient.webSocket(
+                        ConsoleRoutes.WEBSOCKET,
+                        request = { header(HttpHeaders.Origin, TEST_BROWSER_ORIGIN) },
+                    ) {
+                        val observerSocket = this
+                        observerSocket.sendClient(
+                            "hello-observer",
+                            hello(listOf("1.1", "1.0")),
+                        )
+                        val observerInitial =
+                            observerSocket.receiveUntil("1.1") {
+                                it.type == ConsoleMessageType.LEASE_STATE
+                            }
+                        assertEquals(
+                            "1.1",
+                            observerInitial.payload<ServerHelloPayload>()
+                                .selectedProtocolVersion,
+                        )
+                        val observerAuthority =
+                            observerInitial.payload<CommissioningAuthorityStatePayload>()
+                        assertEquals(CommissioningAuthorityState.INACTIVE, observerAuthority.state)
+                        assertEquals(
+                            CommissioningAuthorityReason.NO_ACTIVE_SESSION,
+                            observerAuthority.reason,
+                        )
+                        assertNull(observerAuthority.commissioningId)
+
+                        socketClient.webSocket(
+                            ConsoleRoutes.WEBSOCKET,
+                            request = { header(HttpHeaders.Origin, TEST_BROWSER_ORIGIN) },
+                        ) {
+                            val ownerSocket = this
+                            ownerSocket.sendClient(
+                                "hello-owner",
+                                hello(listOf("1.1", "1.0")),
+                            )
+                            val ownerInitial =
+                                ownerSocket.receiveUntil("1.1") {
+                                    it.type == ConsoleMessageType.LEASE_STATE
+                                }
+                            val ownerHello = ownerInitial.payload<ServerHelloPayload>()
+                            val ownerRuntime = ownerInitial.payload<RuntimeStatePayload>()
+                            val initialAuthority =
+                                ownerInitial.payload<CommissioningAuthorityStatePayload>()
+                            assertEquals("1.1", ownerHello.selectedProtocolVersion)
+                            assertEquals(ActuationLockState.LOCKED, ownerRuntime.actuationLock)
+                            assertEquals(CommissioningAuthorityState.INACTIVE, initialAuthority.state)
+                            assertEquals(
+                                CommissioningAuthorityReason.NO_ACTIVE_SESSION,
+                                initialAuthority.reason,
+                            )
+                            assertEquals("0", initialAuthority.generation)
+
+                            fixture.emitStaleRecipientAuthority(ownerHello.sessionId)
+                            fixture.publishHealth(10L)
+                            val staleRecipientBarrier =
+                                ownerSocket.receiveUntil("1.1") {
+                                    (it.payload as? HealthPayload)?.uptimeMs == 10L
+                                }
+                            assertTrue(
+                                staleRecipientBarrier.none {
+                                    it.payload is CommissioningAuthorityStatePayload
+                                },
+                            )
+
+                            val grant = fixture.startCommissioning(ownerHello.sessionId)
+                            val activeMessages =
+                                ownerSocket.receiveUntil("1.1") {
+                                    (it.payload as? CommissioningAuthorityStatePayload)?.state ==
+                                        CommissioningAuthorityState.ACTIVE
+                                }
+                            val active =
+                                activeMessages.mapNotNull {
+                                    it.payload as? CommissioningAuthorityStatePayload
+                                }.single { it.state == CommissioningAuthorityState.ACTIVE }
+                            assertEquals(grant.commissioningId, active.commissioningId)
+                            assertEquals(grant.generation.toString(), active.generation)
+                            assertEquals(listOf(CommissioningIntent.VIRTUAL_STICK), active.allowedIntents)
+                            assertTrue(checkNotNull(active.expiresInMs) in 1L..5_000L)
+                            assertTrue(
+                                active.stateRevision.toLong() >
+                                    initialAuthority.stateRevision.toLong(),
+                            )
+
+                            fixture.publishHealth(20L)
+                            val observerAfterActive =
+                                observerSocket.receiveUntil("1.1") {
+                                    (it.payload as? HealthPayload)?.uptimeMs == 20L
+                                }
+                            assertTrue(
+                                observerAfterActive.none {
+                                    it.payload is CommissioningAuthorityStatePayload
+                                },
+                            )
+                            val legacyAfterActive =
+                                legacySocket.receiveUntil("1.0") {
+                                    (it.payload as? HealthPayload)?.uptimeMs == 20L
+                                }
+                            assertTrue(
+                                legacyAfterActive.none {
+                                    it.type == ConsoleMessageType.COMMISSIONING_AUTHORITY_STATE
+                                },
+                            )
+
+                            fixture.revokeCommissioning(grant)
+                            val terminalMessages =
+                                ownerSocket.receiveUntil("1.1") {
+                                    (it.payload as? CommissioningAuthorityStatePayload)?.reason ==
+                                        CommissioningAuthorityReason.HOST_REVOKED
+                                }
+                            val terminal =
+                                terminalMessages.mapNotNull {
+                                    it.payload as? CommissioningAuthorityStatePayload
+                                }.single { it.reason == CommissioningAuthorityReason.HOST_REVOKED }
+                            assertEquals(CommissioningAuthorityState.INACTIVE, terminal.state)
+                            assertEquals(active.commissioningId, terminal.commissioningId)
+                            assertEquals(active.generation, terminal.generation)
+                            assertTrue(
+                                terminal.stateRevision.toLong() > active.stateRevision.toLong(),
+                            )
+
+                            fixture.publishHealth(30L)
+                            val observerAfterTerminal =
+                                observerSocket.receiveUntil("1.1") {
+                                    (it.payload as? HealthPayload)?.uptimeMs == 30L
+                                }
+                            assertTrue(
+                                observerAfterTerminal.none {
+                                    it.payload is CommissioningAuthorityStatePayload
+                                },
+                            )
+                            legacySocket.receiveUntil("1.0") {
+                                (it.payload as? HealthPayload)?.uptimeMs == 30L
+                            }
+                        }
+                    }
+                }
+            }
+        } finally {
+            fixture.close()
+        }
+    }
+
     private suspend fun DefaultClientWebSocketSession.sendClient(
         messageId: String,
         payload: ConsoleClientPayload,
+        protocolVersion: String = ConsoleProtocolModule.BOOTSTRAP_PROTOCOL_VERSION,
     ) {
-        send(Frame.Text(codec.encodeClient(ConsoleClientMessage(messageId, payload))))
+        send(
+            Frame.Text(
+                codec.encodeClient(
+                    ConsoleClientMessage(messageId, payload),
+                    protocolVersion,
+                ),
+            ),
+        )
     }
 
     private suspend fun DefaultClientWebSocketSession.receiveUntil(
+        protocolVersion: String = ConsoleProtocolModule.PROTOCOL_VERSION,
         complete: (ConsoleServerMessage) -> Boolean,
     ): List<ConsoleServerMessage> =
         withTimeout(3_000L) {
@@ -322,7 +527,7 @@ class HardwareCommissioningWebSocketIntegrationTest {
             while (true) {
                 val frame = incoming.receive()
                 if (frame !is Frame.Text) continue
-                val message = codec.decodeServer(frame.readText())
+                val message = codec.decodeServer(frame.readText(), protocolVersion)
                 messages += message
                 if (complete(message)) return@withTimeout messages
             }
@@ -333,11 +538,13 @@ class HardwareCommissioningWebSocketIntegrationTest {
     private inline fun <reified T : Any> List<ConsoleServerMessage>.payload(): T =
         mapNotNull { it.payload as? T }.single()
 
-    private fun hello(): ClientHelloPayload =
+    private fun hello(
+        supportedProtocolVersions: List<String> = listOf("1.0"),
+    ): ClientHelloPayload =
         ClientHelloPayload(
             clientName = "commissioning-e2e",
             clientVersion = "0.1.0-test",
-            supportedProtocolVersions = listOf("1.0"),
+            supportedProtocolVersions = supportedProtocolVersions,
             authentication = null,
         )
 
@@ -452,6 +659,40 @@ class HardwareCommissioningWebSocketIntegrationTest {
                     ttlMillis = 5_000L,
                 ).session,
             )
+
+        fun revokeCommissioning(session: ConsoleCommissioningSessionView) {
+            check(
+                core.revokeHardwareCommissioning(session) ==
+                    ConsoleCommissioningRevokeDecision.REVOKED,
+            )
+        }
+
+        fun emitStaleRecipientAuthority(sessionId: String) {
+            protocol.emit(
+                sessionId,
+                ConsoleCoreEvent.CommissioningAuthorityChanged(
+                    recipientSession = ConsoleSession(sessionId, "stale-core-session"),
+                    state =
+                        ConsoleCommissioningAuthorityState(
+                            stateRevision = 999L,
+                            state = ConsoleCommissioningAuthorityStatus.ACTIVE,
+                            commissioningId = "00000000-0000-4000-8000-000000000999",
+                            generation = 999L,
+                            allowedIntents = setOf(ConsoleActuationIntent.VIRTUAL_STICK),
+                            expiresInMillis = 1_000L,
+                            reason = null,
+                        ),
+                ),
+            )
+        }
+
+        fun publishHealth(uptimeMillis: Long) {
+            check(
+                protocol.publishHealth(
+                    HealthPayload(HealthStatus.HEALTHY, uptimeMillis, null),
+                ),
+            )
+        }
 
         suspend fun awaitCommissioningTermination(
             reason: String,

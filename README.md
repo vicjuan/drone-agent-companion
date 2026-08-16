@@ -84,4 +84,11 @@ with server-side lease, TTL, dead-man and neutral enforcement. Mock RTH is a com
 observable simulation because the upstream mock adapter has no RTH action port. It is not G520 or
 DJI evidence.
 
+The console keeps the frozen v1.0 wire inventory for legacy clients and negotiates v1.1 only when
+both peers advertise it. v1.1 adds one server-to-browser, per-session commissioning-authority
+observation; it adds no browser command for starting, renewing, widening, or revoking authority.
+During DJI commissioning the public runtime lock remains `LOCKED`, and the SPA enables only the
+exact intents in a still-live server-owned grant while an owned control lease is held. This read
+model is not hardware evidence and never promotes a capability-matrix row.
+
 All G520 hardware capabilities remain `UNKNOWN` until first-hand commissioning evidence exists.

@@ -282,6 +282,106 @@ class ConsoleProtocolValidationTest {
     }
 
     @Test
+    fun `authority observation accepts only exact initial active and terminal shapes`() {
+        val initial =
+            CommissioningAuthorityStatePayload(
+                stateRevision = "9",
+                state = CommissioningAuthorityState.INACTIVE,
+                commissioningId = null,
+                generation = "0",
+                allowedIntents = emptyList(),
+                expiresInMs = null,
+                reason = CommissioningAuthorityReason.NO_ACTIVE_SESSION,
+            )
+        val active =
+            CommissioningAuthorityStatePayload(
+                stateRevision = "1",
+                state = CommissioningAuthorityState.ACTIVE,
+                commissioningId = "123e4567-e89b-42d3-a456-426614174000",
+                generation = "1",
+                allowedIntents =
+                    listOf(
+                        CommissioningIntent.LANDING,
+                        CommissioningIntent.RETURN_TO_HOME,
+                        CommissioningIntent.VIRTUAL_STICK,
+                    ),
+                expiresInMs = 30_000,
+                reason = null,
+            )
+        val terminal =
+            active.copy(
+                stateRevision = "2",
+                state = CommissioningAuthorityState.INACTIVE,
+                allowedIntents = emptyList(),
+                expiresInMs = null,
+                reason = CommissioningAuthorityReason.HOST_REVOKED,
+            )
+
+        listOf(initial.copy(stateRevision = "0"), initial, active, terminal)
+            .forEach(::assertValidAuthority)
+    }
+
+    @Test
+    fun `authority observation rejects ambiguous identity allowlist ttl and terminal evidence`() {
+        val active =
+            CommissioningAuthorityStatePayload(
+                stateRevision = "7",
+                state = CommissioningAuthorityState.ACTIVE,
+                commissioningId = "123e4567-e89b-42d3-a456-426614174000",
+                generation = "4",
+                allowedIntents =
+                    listOf(CommissioningIntent.TAKEOFF, CommissioningIntent.VIRTUAL_STICK),
+                expiresInMs = 5_000,
+                reason = null,
+            )
+        val invalid =
+            listOf(
+                active.copy(stateRevision = "07"),
+                active.copy(stateRevision = "9223372036854775808"),
+                active.copy(generation = "00"),
+                active.copy(commissioningId = active.commissioningId?.uppercase()),
+                active.copy(commissioningId = "123e4567-e89b-32d3-a456-426614174000"),
+                active.copy(allowedIntents = emptyList()),
+                active.copy(
+                    allowedIntents =
+                        listOf(CommissioningIntent.VIRTUAL_STICK, CommissioningIntent.TAKEOFF),
+                ),
+                active.copy(
+                    allowedIntents =
+                        listOf(CommissioningIntent.TAKEOFF, CommissioningIntent.TAKEOFF),
+                ),
+                active.copy(expiresInMs = 0),
+                active.copy(
+                    expiresInMs =
+                        ConsoleProtocolModule.MAX_COMMISSIONING_AUTHORITY_REMAINING_TTL_MS + 1,
+                ),
+                active.copy(reason = CommissioningAuthorityReason.HOST_REVOKED),
+                active.copy(
+                    state = CommissioningAuthorityState.INACTIVE,
+                    allowedIntents = emptyList(),
+                    expiresInMs = null,
+                    reason = CommissioningAuthorityReason.NO_ACTIVE_SESSION,
+                ),
+                active.copy(
+                    stateRevision = "0",
+                    state = CommissioningAuthorityState.INACTIVE,
+                    allowedIntents = emptyList(),
+                    expiresInMs = null,
+                    reason = CommissioningAuthorityReason.HOST_REVOKED,
+                ),
+                active.copy(
+                    state = CommissioningAuthorityState.INACTIVE,
+                    commissioningId = null,
+                    allowedIntents = emptyList(),
+                    expiresInMs = null,
+                    reason = CommissioningAuthorityReason.TTL_EXPIRED,
+                ),
+            )
+
+        invalid.forEach(::assertInvalidAuthority)
+    }
+
+    @Test
     fun `capability snapshot locks G520 identity ISO date and unique rows`() {
         val base =
             CapabilitySnapshotPayload(
@@ -361,6 +461,31 @@ class ConsoleProtocolValidationTest {
     private fun assertValidServer(payload: ConsoleServerPayload) {
         val message = ConsoleServerMessage("capability-valid-001", payload)
         assertEquals(message, codec.decodeServer(codec.encodeServer(message)))
+    }
+
+    private fun assertValidAuthority(payload: CommissioningAuthorityStatePayload) {
+        val message = ConsoleServerMessage("authority-valid-001", payload)
+        val encoded =
+            codec.encodeServer(
+                message,
+                ConsoleProtocolModule.COMMISSIONING_AUTHORITY_PROTOCOL_VERSION,
+            )
+        assertEquals(
+            message,
+            codec.decodeServer(
+                encoded,
+                ConsoleProtocolModule.COMMISSIONING_AUTHORITY_PROTOCOL_VERSION,
+            ),
+        )
+    }
+
+    private fun assertInvalidAuthority(payload: CommissioningAuthorityStatePayload) {
+        assertCode(ProtocolErrorCode.INVALID_PAYLOAD) {
+            codec.encodeServer(
+                ConsoleServerMessage("authority-invalid-001", payload),
+                ConsoleProtocolModule.COMMISSIONING_AUTHORITY_PROTOCOL_VERSION,
+            )
+        }
     }
 
     private fun assertInvalidClient(message: ConsoleClientMessage) {

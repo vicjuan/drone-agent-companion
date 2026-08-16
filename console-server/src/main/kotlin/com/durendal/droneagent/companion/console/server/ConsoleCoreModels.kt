@@ -1,5 +1,8 @@
 package com.durendal.droneagent.companion.console.server
 
+import java.util.Collections
+import java.util.EnumSet
+
 /** Server-generated identity. Browser supplied client ids are metadata only. */
 data class ConsoleSession(
     val sessionId: String,
@@ -103,12 +106,94 @@ data class ConsoleSafetyAction(
     val detail: String?,
 )
 
+enum class ConsoleCommissioningAuthorityStatus { INACTIVE, ACTIVE }
+
+enum class ConsoleCommissioningAuthorityReason {
+    NO_ACTIVE_SESSION,
+    HOST_REVOKED,
+    TTL_EXPIRED,
+    OPERATOR_DISCONNECTED,
+    OBSERVATION_LOST,
+    RUNTIME_STATE_CHANGED,
+    SERVER_CLOSED,
+    AUDIT_UNAVAILABLE,
+    DEADLINE_UNAVAILABLE,
+}
+
+/**
+ * Personalized, read-only projection of effective commissioning authority.
+ *
+ * This is not a capability claim or a bearer credential. An ACTIVE value is produced only for
+ * the exact live operator session after Core has durably committed the start and attached its
+ * monotonic deadline. Other sessions receive an INACTIVE/NO_ACTIVE_SESSION observation with its
+ * own capture-order revision. [allowedIntents] is always a defensive, unmodifiable snapshot.
+ */
+class ConsoleCommissioningAuthorityState(
+    val stateRevision: Long,
+    val state: ConsoleCommissioningAuthorityStatus,
+    val commissioningId: String?,
+    val generation: Long,
+    allowedIntents: Set<ConsoleActuationIntent>,
+    val expiresInMillis: Long?,
+    val reason: ConsoleCommissioningAuthorityReason?,
+) {
+    val allowedIntents: Set<ConsoleActuationIntent> =
+        if (allowedIntents.isEmpty()) {
+            emptySet()
+        } else {
+            Collections.unmodifiableSet(EnumSet.copyOf(allowedIntents))
+        }
+
+    init {
+        require(stateRevision >= 0L) { "commissioning state revision must not be negative" }
+        when (state) {
+            ConsoleCommissioningAuthorityStatus.ACTIVE -> {
+                require(stateRevision > 0L)
+                require(commissioningId != null)
+                require(generation > 0L)
+                require(allowedIntents.isNotEmpty())
+                require(expiresInMillis != null && expiresInMillis > 0L)
+                require(reason == null)
+            }
+            ConsoleCommissioningAuthorityStatus.INACTIVE -> {
+                require(allowedIntents.isEmpty())
+                require(expiresInMillis == null)
+                require(reason != null)
+                if (reason == ConsoleCommissioningAuthorityReason.NO_ACTIVE_SESSION) {
+                    require(commissioningId == null)
+                    require(generation == 0L)
+                } else {
+                    require(stateRevision > 0L)
+                    require(commissioningId != null)
+                    require(generation > 0L)
+                }
+            }
+        }
+    }
+}
+
+fun initialCommissioningAuthorityState() =
+    ConsoleCommissioningAuthorityState(
+        stateRevision = 0L,
+        state = ConsoleCommissioningAuthorityStatus.INACTIVE,
+        commissioningId = null,
+        generation = 0L,
+        allowedIntents = emptySet(),
+        expiresInMillis = null,
+        reason = ConsoleCommissioningAuthorityReason.NO_ACTIVE_SESSION,
+    )
+
 sealed interface ConsoleCoreEvent {
     data class LeaseChanged(val state: ConsoleLeaseState) : ConsoleCoreEvent
     data class CommandAcknowledged(val ack: ConsoleCommandAck) : ConsoleCoreEvent
     data class CommandCompleted(val result: ConsoleCommandResult) : ConsoleCoreEvent
     data class ControlAcknowledged(val ack: ConsoleControlAck) : ConsoleCoreEvent
     data class SafetyActionObserved(val action: ConsoleSafetyAction) : ConsoleCoreEvent
+    data class CommissioningAuthorityChanged(
+        /** Exact Core session identity; adapters must not route by [sessionId][ConsoleSession.sessionId] alone. */
+        val recipientSession: ConsoleSession,
+        val state: ConsoleCommissioningAuthorityState,
+    ) : ConsoleCoreEvent
     data class AuditRecorded(val audit: ConsoleAuditEvent) : ConsoleCoreEvent
 }
 

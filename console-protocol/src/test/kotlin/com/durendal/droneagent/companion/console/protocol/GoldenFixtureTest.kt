@@ -66,18 +66,27 @@ class GoldenFixtureTest {
         )
         assertEquals(
             ConsoleMessageType.entries
-                .filter { it.direction == ConsoleMessageDirection.CLIENT_TO_SERVER }
+                .filter {
+                    it.isAvailableIn(ConsoleProtocolModule.PROTOCOL_VERSION) &&
+                        it.direction == ConsoleMessageDirection.CLIENT_TO_SERVER
+                }
                 .map(ConsoleMessageType::wireName),
             manifest.clientMessageTypes,
         )
         assertEquals(
             ConsoleMessageType.entries
-                .filter { it.direction == ConsoleMessageDirection.SERVER_TO_CLIENT }
+                .filter {
+                    it.isAvailableIn(ConsoleProtocolModule.PROTOCOL_VERSION) &&
+                        it.direction == ConsoleMessageDirection.SERVER_TO_CLIENT
+                }
                 .map(ConsoleMessageType::wireName),
             manifest.serverMessageTypes,
         )
         assertEquals(
-            ConsoleMessageType.entries.map(ConsoleMessageType::wireName).toSet(),
+            ConsoleMessageType.entries
+                .filter { it.isAvailableIn(ConsoleProtocolModule.PROTOCOL_VERSION) }
+                .map(ConsoleMessageType::wireName)
+                .toSet(),
             manifest.fixtures.map(FixtureEntry::type).toSet(),
         )
         assertEquals(

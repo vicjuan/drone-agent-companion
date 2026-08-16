@@ -66,10 +66,16 @@ source set 不依賴 mock；只有 `mockImplementation` 與 `src/mock` compositi
 ## Weekend console 實作切片
 
 瀏覽器 console 使用本 repo 自有的 versioned wire contract，與凍結的
-`contracts/agent-protocol/` 完全分離。v1 固定 18 種 message type（client 7、server 11），
-Kotlin 與 TypeScript 共讀 canonical fixtures 與 digest；decoder 對方向、欄位、數值語意、
-64 KiB frame 上限與 JSON nesting 深度均 fail-closed。瀏覽器 payload 無法提供或
-覆寫 authority decision、adapter、aircraft connection、actuation lock 或 operating profile。
+`contracts/agent-protocol/` 完全分離。v1.0 固定 18 種 message type（client 7、
+server 11）且繼續由原 canonical fixtures 與 digest 凍結；`client_hello` 使用
+v1.0 bootstrap envelope，server 再為每個 socket 選擇最高共同版本。v1.1 只新增
+一種 server-to-client `commissioning_authority_state` 觀察訊息，瀏覽器依然只有
+原本 7 種上行訊息，無法啟動、擴權、延長或撤銷 commissioning。v1.0
+session 絕不會收到新 type；新 client 與舊 server 協商回 v1.0 時，DJI 操作
+仍 fail-closed。Kotlin 與 TypeScript 共讀各版 canonical fixtures 與 digest；decoder
+對方向、欄位、數值語意、64 KiB frame 上限與 JSON nesting 深度均
+fail-closed。瀏覽器 payload 無法提供或覆寫 authority decision、adapter、
+aircraft connection、actuation lock 或 operating profile。
 
 JVM runner 已選用 Ktor CIO，並實作靜態 SPA 與 `/api/console/v1` WebSocket。Android
 mock flavor 也已接上同一 server、content-addressed SPA assets 與 runtime composition；
@@ -145,7 +151,11 @@ closed-loop-not-executed guard）隨 submodule 一併生效，CI 必須執行。
    不得開啟 Internet Connection Sharing 或 network bridge。進入共享、無線或可路由
    網路前，必須先完成 #5 的認證與傳輸安全。
 5. **狀態必須如實呈現。** UI 不需要固定的「MOCK DEMO」橫幅，但必須顯示目前
-   adapter（Mock／DJI）、aircraft connection 與 actuation lock 狀態。
+   adapter（Mock／DJI）、aircraft connection 與 actuation lock 狀態。DJI hardware
+   commissioning 期間的公開 runtime lock 仍必須顯示 `LOCKED`；v1.1 只向 exact
+   operator session 投影 server-owned generation、剩餘 TTL 與 immutable per-intent
+   allowlist。這個短效、唯讀 view 不是 capability 證據，也不得讓 matrix
+   的 `UNKNOWN` 變成可執行事實。
 6. **Evidence logging 不可關閉。** 命令、authority 決策、control lease、neutral
    safety action 與 commissioning 狀態轉換一律落地可回收的審計紀錄。
    admitted/completed 紀錄含 server-owned `authorityDecisionId`、full-intent digest 與

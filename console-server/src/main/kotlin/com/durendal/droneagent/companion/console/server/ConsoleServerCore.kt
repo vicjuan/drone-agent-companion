@@ -57,6 +57,8 @@ class ConsoleServerCore(
         ConsoleCommissioningLifecycle(),
 ) : AutoCloseable {
     private val lock = Any()
+    /** Orders authority events without holding [lock] across transport callbacks. */
+    private val commissioningEventLock = Any()
     /**
      * Linearizes calls into the executor. No code may acquire this lock while holding [lock].
      * Executor entrypoints are required to return promptly; callbacks are delivered after this
@@ -101,6 +103,12 @@ class ConsoleServerCore(
     private var observationEpoch = 0L
     /** A committed generation stays ineffective until its deadline task is durably attached. */
     private var commissioningActivationPending = false
+    /** Capture-order revision for personalized authority observations; never used for admission. */
+    private var commissioningStateRevision = 0L
+    /** Exact Core session identity reserved by the currently committed generation. */
+    private var commissioningOwnerSession: ConsoleSession? = null
+    /** Last terminal projection is retained only for that exact still-live session identity. */
+    private var lastCommissioningTerminal: CommissioningTerminalProjection? = null
     /** Blocks all lease authority until every overlapping terminal evidence owner has finished. */
     private val commissioningTransitionTokens = mutableSetOf<Long>()
     /** Fences a start reservation against a concurrent revoke/start transition. */
@@ -281,7 +289,11 @@ class ConsoleServerCore(
                 } else {
                     commissioningLifecycle.commit(reservation, monotonicClock.nowNanos())
                         .takeIf { it.decision == ConsoleCommissioningCommitDecision.COMMITTED }
-                        ?.also { commissioningActivationPending = true }
+                        ?.also {
+                            commissioningActivationPending = true
+                            commissioningOwnerSession = checkNotNull(snapshot.operatorSession)
+                            lastCommissioningTerminal = null
+                        }
                 }
             }
         }
@@ -312,7 +324,8 @@ class ConsoleServerCore(
         completeCommissioningTransition(startTransitionToken)
         val session = checkNotNull(commit.session)
         when (scheduleCommissioningDeadline(session)) {
-            CommissioningDeadlineAttachDecision.ATTACHED -> Unit
+            CommissioningDeadlineAttachDecision.ATTACHED ->
+                captureActiveCommissioningAuthority(session)?.let(::emitCommissioningAuthority)
             CommissioningDeadlineAttachDecision.SCHEDULER_UNAVAILABLE -> {
                 terminateCommissioning(
                     expectedSession = session,
@@ -358,6 +371,19 @@ class ConsoleServerCore(
             }
             prepared.stale -> ConsoleCommissioningRevokeDecision.STALE_SESSION
             else -> ConsoleCommissioningRevokeDecision.NO_ACTIVE_SESSION
+        }
+    }
+
+    /**
+     * Captures a personalized, read-only authority observation for one transport-owned session.
+     * Every capture receives a unique monotonic revision so a delayed event cannot overwrite a
+     * newer hello snapshot. This method never grants, renews or expands authority.
+     */
+    fun currentCommissioningAuthorityState(sessionId: String): ConsoleCommissioningAuthorityState {
+        requireValidId(sessionId, "sessionId")
+        expireDueWork()
+        return synchronized(lock) {
+            captureCommissioningAuthorityLocked(sessionId)
         }
     }
 
@@ -1454,11 +1480,13 @@ class ConsoleServerCore(
 
     fun disconnect(sessionId: String) {
         var commissioningTermination: CommissioningTermination? = null
+        var disconnectingSession: ConsoleSession? = null
         var disconnectNeutral: NeutralPlan? = null
         var commandTermination: CommandAuthorityTermination? = null
         val transition = synchronized(actuationDispatchLock) {
             synchronized(lock) state@{
                 val opened = sessions[sessionId] ?: return
+                disconnectingSession = opened
                 commissioningLifecycle.currentSession()
                     ?.takeIf { it.operatorSessionId == sessionId }
                     ?.let { current ->
@@ -1468,9 +1496,12 @@ class ConsoleServerCore(
                                 reason = ConsoleCommissioningTerminationReason.OPERATOR_DISCONNECTED,
                             ).transition
                     }
+                if (commissioningTermination != null) return@state null
                 val removed = checkNotNull(sessions.remove(sessionId))
                 if (pendingLease?.session === removed) pendingLease = null
-                if (commissioningTermination != null) return@state null
+                if (lastCommissioningTerminal?.ownerSession === removed) {
+                    lastCommissioningTerminal = null
+                }
                 val invokedRecord =
                     activeDiscreteCommandId?.let(commands::get)
                         ?.takeIf {
@@ -1515,7 +1546,20 @@ class ConsoleServerCore(
         commissioningTermination?.let { commissioning ->
             val evidenceToken = synchronized(lock) { beginCommissioningTransitionLocked() }
             try {
-                finishCommissioningTermination(commissioning)
+                try {
+                    finishCommissioningTermination(commissioning)
+                } finally {
+                    synchronized(lock) {
+                        val expected = checkNotNull(disconnectingSession)
+                        if (sessions[sessionId] === expected) {
+                            sessions.remove(sessionId)
+                            if (pendingLease?.session === expected) pendingLease = null
+                            if (lastCommissioningTerminal?.ownerSession === expected) {
+                                lastCommissioningTerminal = null
+                            }
+                        }
+                    }
+                }
                 recordBestEffort(
                     audit(
                         ConsoleAuditKind.SESSION_DISCONNECTED,
@@ -1587,6 +1631,8 @@ class ConsoleServerCore(
                 pendingLease = null
                 pendingSessions.clear()
                 sessions.clear()
+                commissioningOwnerSession = null
+                lastCommissioningTerminal = null
                 val invokedActionLease =
                     activeDiscreteCommandId?.let(commands::get)
                         ?.takeIf {
@@ -2173,6 +2219,180 @@ class ConsoleServerCore(
     ): Boolean =
         commissioningId == other.commissioningId && generation == other.generation
 
+    /** Caller holds [lock]. Every returned observation owns a unique capture-order revision. */
+    private fun captureCommissioningAuthorityLocked(
+        sessionId: String,
+    ): ConsoleCommissioningAuthorityState {
+        val recipient = checkNotNull(sessions[sessionId]) { "sessionId is not open" }
+        effectiveCommissioningAuthorityLocked(recipient)?.let { return it }
+        lastCommissioningTerminal
+            ?.takeIf { it.ownerSession === recipient }
+            ?.let { return captureTerminalCommissioningAuthorityLocked(it) }
+        return ConsoleCommissioningAuthorityState(
+            stateRevision = nextCommissioningStateRevisionLocked(),
+            state = ConsoleCommissioningAuthorityStatus.INACTIVE,
+            commissioningId = null,
+            generation = 0L,
+            allowedIntents = emptySet(),
+            expiresInMillis = null,
+            reason = ConsoleCommissioningAuthorityReason.NO_ACTIVE_SESSION,
+        )
+    }
+
+    /** Caller holds [lock]. Returns null unless authority is effective for this exact session. */
+    private fun effectiveCommissioningAuthorityLocked(
+        recipient: ConsoleSession,
+    ): ConsoleCommissioningAuthorityState? {
+        if (closed || actuationAdmissionClosed.get() || auditFault ||
+            commissioningActivationPending || commissioningDeadlineTask == null ||
+            commissioningTransitionTokens.isNotEmpty() ||
+            commissioningOwnerSession !== recipient || sessions[recipient.sessionId] !== recipient ||
+            !commissioningPublicLockIsSafeLocked() ||
+            !currentActuationObservationLocked().isEligibleForG520Commissioning()
+        ) {
+            return null
+        }
+        val current = commissioningLifecycle.currentSession() ?: return null
+        if (current.operatorSessionId != recipient.sessionId ||
+            commissioningLifecycle.expiryDecision(current, monotonicClock.nowNanos()) !=
+            ConsoleCommissioningExpiryDecision.NOT_DUE
+        ) {
+            return null
+        }
+        val expiresInMillis = current.remainingTtlMillis(monotonicClock.nowNanos())
+        if (expiresInMillis !in 1L..ConsoleCommissioningLifecycle.MAXIMUM_TTL_MILLIS) return null
+        return ConsoleCommissioningAuthorityState(
+            stateRevision = nextCommissioningStateRevisionLocked(),
+            state = ConsoleCommissioningAuthorityStatus.ACTIVE,
+            commissioningId = current.commissioningId,
+            generation = current.generation,
+            allowedIntents = current.allowedIntents,
+            expiresInMillis = expiresInMillis,
+            reason = null,
+        )
+    }
+
+    private fun captureActiveCommissioningAuthority(
+        expectedSession: ConsoleCommissioningSessionView,
+    ): TargetedCommissioningAuthority? =
+        synchronized(lock) {
+            val owner = commissioningOwnerSession ?: return@synchronized null
+            val state = effectiveCommissioningAuthorityLocked(owner) ?: return@synchronized null
+            if (state.commissioningId != expectedSession.commissioningId ||
+                state.generation != expectedSession.generation
+            ) {
+                return@synchronized null
+            }
+            TargetedCommissioningAuthority(owner, state)
+        }
+
+    /** Caller holds [lock]. */
+    private fun captureTerminalCommissioningAuthorityLocked(
+        terminal: CommissioningTerminalProjection,
+    ): ConsoleCommissioningAuthorityState =
+        ConsoleCommissioningAuthorityState(
+            stateRevision = nextCommissioningStateRevisionLocked(),
+            state = ConsoleCommissioningAuthorityStatus.INACTIVE,
+            commissioningId = terminal.session.commissioningId,
+            generation = terminal.session.generation,
+            allowedIntents = emptySet(),
+            expiresInMillis = null,
+            reason = terminal.reason,
+        )
+
+    /** Caller holds [lock]. */
+    private fun nextCommissioningStateRevisionLocked(): Long {
+        commissioningStateRevision =
+            nextCounter(commissioningStateRevision, "commissioning state revision")
+        return commissioningStateRevision
+    }
+
+    private fun emitCommissioningAuthority(targeted: TargetedCommissioningAuthority) {
+        synchronized(commissioningEventLock) {
+            val stillCurrent = synchronized(lock) {
+                sessions[targeted.ownerSession.sessionId] === targeted.ownerSession &&
+                    when (targeted.state.state) {
+                        ConsoleCommissioningAuthorityStatus.ACTIVE -> {
+                            val current = commissioningLifecycle.currentSession()
+                            current != null &&
+                                !closed && !actuationAdmissionClosed.get() &&
+                                commissioningOwnerSession === targeted.ownerSession &&
+                                current.commissioningId == targeted.state.commissioningId &&
+                                current.generation == targeted.state.generation &&
+                                !commissioningActivationPending && !auditFault &&
+                                commissioningDeadlineTask != null &&
+                                commissioningTransitionTokens.isEmpty() &&
+                                commissioningPublicLockIsSafeLocked() &&
+                                currentActuationObservationLocked().isEligibleForG520Commissioning() &&
+                                commissioningLifecycle.expiryDecision(current, monotonicClock.nowNanos()) ==
+                                ConsoleCommissioningExpiryDecision.NOT_DUE
+                        }
+                        ConsoleCommissioningAuthorityStatus.INACTIVE ->
+                            lastCommissioningTerminal?.let { terminal ->
+                                terminal.ownerSession === targeted.ownerSession &&
+                                    terminal.session.commissioningId == targeted.state.commissioningId &&
+                                    terminal.session.generation == targeted.state.generation &&
+                                    terminal.reason == targeted.state.reason
+                            } == true
+                    }
+            }
+            if (stillCurrent) {
+                emit(
+                    targeted.ownerSession.sessionId,
+                    ConsoleCoreEvent.CommissioningAuthorityChanged(
+                        recipientSession = targeted.ownerSession,
+                        state = targeted.state,
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun captureAuditUnavailableTerminal(
+        transition: CommissioningTermination,
+    ): TargetedCommissioningAuthority? =
+        synchronized(lock) {
+            val previous = lastCommissioningTerminal ?: return@synchronized null
+            val originalTarget = transition.authority ?: return@synchronized null
+            if (previous.ownerSession !== originalTarget.ownerSession ||
+                !previous.session.sameCommissioningGeneration(transition.session)
+            ) {
+                return@synchronized null
+            }
+            val replacement =
+                CommissioningTerminalProjection(
+                    ownerSession = previous.ownerSession,
+                    session = previous.session,
+                    reason = ConsoleCommissioningAuthorityReason.AUDIT_UNAVAILABLE,
+                )
+            lastCommissioningTerminal = replacement
+            TargetedCommissioningAuthority(
+                replacement.ownerSession,
+                captureTerminalCommissioningAuthorityLocked(replacement),
+            )
+        }
+
+    private fun ConsoleCommissioningTerminationReason.toAuthorityReason():
+        ConsoleCommissioningAuthorityReason =
+        when (this) {
+            ConsoleCommissioningTerminationReason.HOST_REVOKED ->
+                ConsoleCommissioningAuthorityReason.HOST_REVOKED
+            ConsoleCommissioningTerminationReason.TTL_EXPIRED ->
+                ConsoleCommissioningAuthorityReason.TTL_EXPIRED
+            ConsoleCommissioningTerminationReason.OPERATOR_DISCONNECTED ->
+                ConsoleCommissioningAuthorityReason.OPERATOR_DISCONNECTED
+            ConsoleCommissioningTerminationReason.OBSERVATION_LOST ->
+                ConsoleCommissioningAuthorityReason.OBSERVATION_LOST
+            ConsoleCommissioningTerminationReason.RUNTIME_STATE_CHANGED ->
+                ConsoleCommissioningAuthorityReason.RUNTIME_STATE_CHANGED
+            ConsoleCommissioningTerminationReason.SERVER_CLOSED ->
+                ConsoleCommissioningAuthorityReason.SERVER_CLOSED
+            ConsoleCommissioningTerminationReason.AUDIT_UNAVAILABLE ->
+                ConsoleCommissioningAuthorityReason.AUDIT_UNAVAILABLE
+            ConsoleCommissioningTerminationReason.DEADLINE_UNAVAILABLE ->
+                ConsoleCommissioningAuthorityReason.DEADLINE_UNAVAILABLE
+        }
+
     private fun prepareCommissioningTermination(
         expectedSession: ConsoleCommissioningSessionView?,
         reason: ConsoleCommissioningTerminationReason,
@@ -2200,6 +2420,27 @@ class ConsoleServerCore(
         // This is the terminal linearization point. Every later gate sees no active generation.
         val evidenceTransitionToken = beginCommissioningTransitionLocked()
         commissioningActivationPending = false
+        val terminalOwner =
+            commissioningOwnerSession?.takeIf { owner ->
+                owner.sessionId == current.operatorSessionId && sessions[owner.sessionId] === owner
+            }
+        commissioningOwnerSession = null
+        val terminalProjection =
+            terminalOwner?.let { owner ->
+                CommissioningTerminalProjection(
+                    ownerSession = owner,
+                    session = current,
+                    reason = reason.toAuthorityReason(),
+                )
+            }
+        lastCommissioningTerminal = terminalProjection
+        val terminalAuthority =
+            terminalProjection?.let { terminal ->
+                TargetedCommissioningAuthority(
+                    terminal.ownerSession,
+                    captureTerminalCommissioningAuthorityLocked(terminal),
+                )
+            }
         commissioningScheduleEpoch = nextCounter(commissioningScheduleEpoch, "commissioning schedule epoch")
         val deadlineTask = commissioningDeadlineTask
         commissioningDeadlineTask = null
@@ -2282,6 +2523,7 @@ class ConsoleServerCore(
                 deadlineTask = deadlineTask,
                 evidenceTransitionToken = evidenceTransitionToken,
                 neutralTransitionToken = neutralTransitionToken,
+                authority = terminalAuthority,
             ),
             stale = false,
         )
@@ -2306,6 +2548,10 @@ class ConsoleServerCore(
         var auditRecorded = true
         val afterBarrierInvoked: () -> Unit = {
             try {
+                // Authority was already revoked under dispatch -> state lock, and any required
+                // neutral executor call has already been invoked by executeNeutral. A blocked
+                // observer can therefore delay evidence publication, never safety ordering.
+                transition.authority?.let(::emitCommissioningAuthority)
                 cancelBestEffort(transition.deadlineTask)
                 cancelBestEffort(transition.commandTermination?.deadlineTask)
                 transition.commandTermination?.actionLease?.let(::cancelLeaseTasks)
@@ -2332,6 +2578,10 @@ class ConsoleServerCore(
                             detail = commissioningAuditDetail(transition.session),
                         ),
                     )
+                    if (!auditRecorded) {
+                        captureAuditUnavailableTerminal(transition)
+                            ?.let(::emitCommissioningAuthority)
+                    }
                 }
                 transition.revokedLease?.let { lease ->
                     recordBestEffort(
@@ -2564,7 +2814,9 @@ class ConsoleServerCore(
                 action.transition?.let(::finishCommissioningTermination)
             CommissioningDeadlineAction.RESCHEDULE ->
                 when (scheduleCommissioningDeadline(expectedSession)) {
-                    CommissioningDeadlineAttachDecision.ATTACHED -> Unit
+                    CommissioningDeadlineAttachDecision.ATTACHED ->
+                        captureActiveCommissioningAuthority(expectedSession)
+                            ?.let(::emitCommissioningAuthority)
                     CommissioningDeadlineAttachDecision.SCHEDULER_UNAVAILABLE ->
                         terminateCommissioning(
                             expectedSession,
@@ -3906,6 +4158,15 @@ class ConsoleServerCore(
         val transition: CommissioningTermination?,
         val stale: Boolean,
     )
+    private data class CommissioningTerminalProjection(
+        val ownerSession: ConsoleSession,
+        val session: ConsoleCommissioningSessionView,
+        val reason: ConsoleCommissioningAuthorityReason,
+    )
+    private data class TargetedCommissioningAuthority(
+        val ownerSession: ConsoleSession,
+        val state: ConsoleCommissioningAuthorityState,
+    )
     private data class CommissioningTermination(
         val session: ConsoleCommissioningSessionView,
         val reason: ConsoleCommissioningTerminationReason,
@@ -3917,6 +4178,7 @@ class ConsoleServerCore(
         val deadlineTask: ConsoleScheduledTask?,
         val evidenceTransitionToken: Long,
         val neutralTransitionToken: Long?,
+        val authority: TargetedCommissioningAuthority?,
     )
     private data class CancelledCommissioningCommand(
         val record: CommandRecord,

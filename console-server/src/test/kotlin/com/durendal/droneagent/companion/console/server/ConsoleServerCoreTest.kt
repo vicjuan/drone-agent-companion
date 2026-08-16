@@ -1767,6 +1767,194 @@ class ConsoleServerCoreTest {
     }
 
     @Test
+    fun `commissioning authority observations are personalized monotonic and immutable`() {
+        val fixture = commissioningFixture()
+        fixture.core.openSession("session-a", "browser-a")
+        fixture.core.openSession("session-b", "browser-b")
+
+        val initialOwner = fixture.core.currentCommissioningAuthorityState("session-a")
+        val initialObserver = fixture.core.currentCommissioningAuthorityState("session-b")
+        assertEquals(ConsoleCommissioningAuthorityStatus.INACTIVE, initialOwner.state)
+        assertEquals(ConsoleCommissioningAuthorityReason.NO_ACTIVE_SESSION, initialOwner.reason)
+        assertEquals(ConsoleCommissioningAuthorityStatus.INACTIVE, initialObserver.state)
+        assertEquals(ConsoleCommissioningAuthorityReason.NO_ACTIVE_SESSION, initialObserver.reason)
+        assertTrue(initialObserver.stateRevision > initialOwner.stateRevision)
+
+        val callerOwnedIntents =
+            linkedSetOf(
+                ConsoleActuationIntent.TAKEOFF,
+                ConsoleActuationIntent.VIRTUAL_STICK,
+            )
+        val grant =
+            checkNotNull(
+                fixture.core.startHardwareCommissioning(
+                    "session-a",
+                    callerOwnedIntents,
+                    5_000L,
+                ).session,
+            )
+        callerOwnedIntents.clear()
+
+        val authorityEvents =
+            fixture.events.events.mapNotNull { (target, event) ->
+                (event as? ConsoleCoreEvent.CommissioningAuthorityChanged)
+                    ?.let { target to it.state }
+            }
+        val activeEvent = authorityEvents.single()
+        assertEquals("session-a", activeEvent.first)
+        assertEquals(ConsoleCommissioningAuthorityStatus.ACTIVE, activeEvent.second.state)
+        assertEquals(grant.commissioningId, activeEvent.second.commissioningId)
+        assertEquals(grant.generation, activeEvent.second.generation)
+        assertEquals(
+            setOf(ConsoleActuationIntent.TAKEOFF, ConsoleActuationIntent.VIRTUAL_STICK),
+            activeEvent.second.allowedIntents,
+        )
+        assertTrue(activeEvent.second.stateRevision > initialObserver.stateRevision)
+
+        val owner = fixture.core.currentCommissioningAuthorityState("session-a")
+        val observer = fixture.core.currentCommissioningAuthorityState("session-b")
+        assertEquals(ConsoleCommissioningAuthorityStatus.ACTIVE, owner.state)
+        assertEquals(ConsoleCommissioningAuthorityStatus.INACTIVE, observer.state)
+        assertEquals(ConsoleCommissioningAuthorityReason.NO_ACTIVE_SESSION, observer.reason)
+        assertNull(observer.commissioningId)
+        assertTrue(owner.stateRevision > activeEvent.second.stateRevision)
+        assertTrue(observer.stateRevision > owner.stateRevision)
+        assertTrue(
+            runCatching {
+                @Suppress("UNCHECKED_CAST")
+                (owner.allowedIntents as MutableSet<ConsoleActuationIntent>)
+                    .add(ConsoleActuationIntent.LANDING)
+            }.isFailure,
+        )
+        assertFalse(ConsoleActuationIntent.LANDING in owner.allowedIntents)
+
+        assertEquals(
+            ConsoleCommissioningRevokeDecision.REVOKED,
+            fixture.core.revokeHardwareCommissioning(grant),
+        )
+        val terminal = fixture.core.currentCommissioningAuthorityState("session-a")
+        val terminalObserver = fixture.core.currentCommissioningAuthorityState("session-b")
+        assertEquals(ConsoleCommissioningAuthorityStatus.INACTIVE, terminal.state)
+        assertEquals(ConsoleCommissioningAuthorityReason.HOST_REVOKED, terminal.reason)
+        assertEquals(grant.commissioningId, terminal.commissioningId)
+        assertEquals(grant.generation, terminal.generation)
+        assertTrue(terminal.stateRevision > observer.stateRevision)
+        assertEquals(ConsoleCommissioningAuthorityReason.NO_ACTIVE_SESSION, terminalObserver.reason)
+        assertNull(terminalObserver.commissioningId)
+
+        fixture.core.disconnect("session-a")
+        fixture.core.openSession("session-a", "browser-a")
+        val replacementIdentity = fixture.core.currentCommissioningAuthorityState("session-a")
+        assertEquals(ConsoleCommissioningAuthorityReason.NO_ACTIVE_SESSION, replacementIdentity.reason)
+        assertNull(replacementIdentity.commissioningId)
+        assertEquals(0L, replacementIdentity.generation)
+    }
+
+    @Test
+    fun `failed commissioning starts never publish active authority`() {
+        val auditFailure = commissioningFixture()
+        auditFailure.core.openSession("session-a")
+        auditFailure.audit.failKinds += ConsoleAuditKind.COMMISSIONING_STARTED
+        assertEquals(
+            ConsoleCommissioningStartDecision.AUDIT_UNAVAILABLE,
+            auditFailure.core.startHardwareCommissioning(
+                "session-a",
+                setOf(ConsoleActuationIntent.TAKEOFF),
+                5_000L,
+            ).decision,
+        )
+        assertTrue(
+            auditFailure.events.events.none {
+                (it.second as? ConsoleCoreEvent.CommissioningAuthorityChanged)
+                    ?.state?.state == ConsoleCommissioningAuthorityStatus.ACTIVE
+            },
+        )
+
+        val deadlineFailure = commissioningFixture()
+        deadlineFailure.core.openSession("session-a")
+        deadlineFailure.scheduler.throwOnNextSchedule = true
+        assertEquals(
+            ConsoleCommissioningStartDecision.DEADLINE_UNAVAILABLE,
+            deadlineFailure.core.startHardwareCommissioning(
+                "session-a",
+                setOf(ConsoleActuationIntent.TAKEOFF),
+                5_000L,
+            ).decision,
+        )
+        val projected =
+            deadlineFailure.events.events.mapNotNull { (target, event) ->
+                (event as? ConsoleCoreEvent.CommissioningAuthorityChanged)
+                    ?.let { target to it.state }
+            }
+        assertTrue(projected.none { it.second.state == ConsoleCommissioningAuthorityStatus.ACTIVE })
+        assertEquals("session-a", projected.single().first)
+        assertEquals(ConsoleCommissioningAuthorityReason.DEADLINE_UNAVAILABLE, projected.single().second.reason)
+    }
+
+    @Test
+    fun `terminal authority event cannot block revoke or neutral invocation`() {
+        val terminalEventEntered = CountDownLatch(1)
+        val releaseTerminalEvent = CountDownLatch(1)
+        val recorded = mutableListOf<Pair<String?, ConsoleCoreEvent>>()
+        val eventSink =
+            ConsoleEventSink { target, event ->
+                if ((event as? ConsoleCoreEvent.CommissioningAuthorityChanged)
+                        ?.state?.reason == ConsoleCommissioningAuthorityReason.HOST_REVOKED
+                ) {
+                    terminalEventEntered.countDown()
+                    check(releaseTerminalEvent.await(2L, TimeUnit.SECONDS))
+                }
+                recorded += target to event
+            }
+        val fixture = commissioningFixture(eventSinkOverride = eventSink)
+        fixture.core.openSession("session-a")
+        val grant =
+            checkNotNull(
+                fixture.core.startHardwareCommissioning(
+                    "session-a",
+                    setOf(ConsoleActuationIntent.VIRTUAL_STICK),
+                    5_000L,
+                ).session,
+            )
+        val lease = checkNotNull(fixture.core.acquireLease("session-a", 5_000L).leaseId)
+        assertEquals(
+            ConsoleControlStatus.APPLIED,
+            fixture.core.handleControlFrame("session-a", frame(lease, 1L)).status,
+        )
+
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val revoke = pool.submit(Callable { fixture.core.revokeHardwareCommissioning(grant) })
+            assertTrue(terminalEventEntered.await(1L, TimeUnit.SECONDS))
+            assertNull(fixture.commissioningLifecycle.currentSession())
+            assertNull(fixture.core.currentLease())
+            assertEquals(1, fixture.executor.neutralCalls.size)
+            assertFalse(revoke.isDone)
+            assertTrue(
+                fixture.audit.attempts.none {
+                    it.kind == ConsoleAuditKind.COMMISSIONING_TERMINATED
+                },
+            )
+
+            releaseTerminalEvent.countDown()
+            assertEquals(
+                ConsoleCommissioningRevokeDecision.REVOKED,
+                revoke.get(1L, TimeUnit.SECONDS),
+            )
+            assertTrue(
+                recorded.any { (target, event) ->
+                    target == "session-a" &&
+                        (event as? ConsoleCoreEvent.CommissioningAuthorityChanged)
+                            ?.state?.reason == ConsoleCommissioningAuthorityReason.HOST_REVOKED
+                },
+            )
+        } finally {
+            releaseTerminalEvent.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
     fun `blocked start audit rejects disconnect reopen of the identical operator session`() {
         val fixture = commissioningFixture()
         fixture.core.openSession("session-a", "browser-a")
@@ -2737,7 +2925,9 @@ class ConsoleServerCoreTest {
 
     private fun commissioningFixture(
         lifecycle: ConsoleCommissioningLifecycle = ConsoleCommissioningLifecycle(),
+        eventSinkOverride: ConsoleEventSink? = null,
     ) = Fixture(
+        eventSinkOverride = eventSinkOverride,
         initialReadiness = DJI_COMMISSIONING_READINESS,
         initialObservation = DJI_COMMISSIONING_OBSERVATION,
         commissioningLifecycleOverride = lifecycle,

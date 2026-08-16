@@ -1,0 +1,14 @@
+{
+  "protocolVersion": "1.1",
+  "messageId": "fixture-authority-initial-001",
+  "type": "commissioning_authority_state",
+  "payload": {
+    "stateRevision": "17",
+    "state": "inactive",
+    "commissioningId": null,
+    "generation": "0",
+    "allowedIntents": [],
+    "expiresInMs": null,
+    "reason": "no_active_session"
+  }
+}
