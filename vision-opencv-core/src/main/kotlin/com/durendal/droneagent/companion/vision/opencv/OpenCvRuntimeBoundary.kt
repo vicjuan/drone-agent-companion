@@ -8,10 +8,18 @@ import com.durendal.droneagent.vision.segment.Segmenter
 data class OpenCvRuntimeIdentity(
     val version: String,
     val platform: String,
+    val buildInformationSha256: String,
 ) {
     init {
         require(version.isNotBlank()) { "version must not be blank" }
         require(platform.isNotBlank()) { "platform must not be blank" }
+        require(BUILD_INFORMATION_SHA256.matches(buildInformationSha256)) {
+            "buildInformationSha256 must be 64 lowercase hexadecimal characters"
+        }
+    }
+
+    private companion object {
+        val BUILD_INFORMATION_SHA256 = Regex("[0-9a-f]{64}")
     }
 }
 
@@ -22,6 +30,15 @@ data class OpenCvRuntimeIdentity(
 fun interface OpenCvNativeInitializer {
     fun initialize(): OpenCvRuntimeIdentity
 }
+
+/**
+ * Fail-closed signal that no segmentation result was produced because OpenCV
+ * could not be initialized or execute a native operation.
+ */
+class OpenCvUnavailableException internal constructor(
+    message: String,
+    cause: Throwable,
+) : IllegalStateException(message, cause)
 
 /** Compile-time pin for the vendor-neutral frame-to-result vision seam. */
 object OpenCvVisionContracts {

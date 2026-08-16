@@ -64,11 +64,12 @@ data class AndroidConsoleRuntimeConfig(
  * [completeStartup] publishes MOCK_READY only for this explicitly mock-only profile; the generic
  * host startup contract never grants hardware commissioning authority.
  */
-class AndroidConsoleRuntime(
+class AndroidConsoleRuntime internal constructor(
     private val config: AndroidConsoleRuntimeConfig,
     private val monotonicNanos: () -> Long = System::nanoTime,
     private val epochMillis: () -> Long = System::currentTimeMillis,
     private val agentFactory: () -> MockDroneAgent = { MockDroneAgent() },
+    private val openCvObservationSessionFactory: (() -> HeadlessOpenCvObservationSession)? = null,
 ) : HeadlessRuntime {
     private val lifecycleLock = Any()
     private val stopRequested = AtomicBoolean(false)
@@ -115,6 +116,10 @@ class AndroidConsoleRuntime(
                 ensureStartupMayContinue(created)
                 created.agent.connection.connect()
             }
+            runStartupPhase(StartupPhase.VISION_START) {
+                ensureStartupAdmitted(created)
+                created.startVisionObservation()
+            }
             runStartupPhase(StartupPhase.LOCKED_RUNTIME_STATE) {
                 ensureStartupMayContinue(created)
                 created.publishRuntimeState()
@@ -143,12 +148,10 @@ class AndroidConsoleRuntime(
             val cleanupResult = created.closeWithin(CLOSE_AFTER_START_FAILURE_MILLIS)
             synchronized(lifecycleLock) {
                 startingComponents = null
-                terminalCloseResult =
-                    cleanupResult.takeUnless { it == RuntimeCloseResult.TIMED_OUT }
-                components =
-                    created.takeIf { cleanupResult == RuntimeCloseResult.TIMED_OUT }
+                terminalCloseResult = cleanupResult.takeIf { it == RuntimeCloseResult.CLOSED }
+                components = created.takeUnless { cleanupResult == RuntimeCloseResult.CLOSED }
                 state =
-                    if (cleanupResult == RuntimeCloseResult.TIMED_OUT) {
+                    if (cleanupResult != RuntimeCloseResult.CLOSED) {
                         State.CLOSE_INCOMPLETE
                     } else {
                         State.CLOSED
@@ -222,7 +225,7 @@ class AndroidConsoleRuntime(
 
         val result = closing.closeWithin(timeoutMillis)
         synchronized(lifecycleLock) {
-            if (result == RuntimeCloseResult.TIMED_OUT) {
+            if (result != RuntimeCloseResult.CLOSED) {
                 components = closing
                 state = State.CLOSE_INCOMPLETE
             } else {
@@ -263,9 +266,12 @@ class AndroidConsoleRuntime(
             }
         val coreReference = AtomicReference<ConsoleServerCore>()
         val controllerReference = AtomicReference<ProtocolConsoleSocketController>()
+        var visionSessionForCleanup: HeadlessOpenCvObservationSession? = null
         var coreForCleanup: ConsoleServerCore? = null
         var serverForCleanup: KtorConsoleServer? = null
         try {
+            val visionSession = openCvObservationSessionFactory?.invoke()
+            visionSessionForCleanup = visionSession
             val protocol =
                 ConsoleCoreProtocolAdapter(
                     coreProvider = {
@@ -334,6 +340,7 @@ class AndroidConsoleRuntime(
                 telemetryListener = telemetryListener,
                 connectionListener = connectionListener,
                 actuationListener = actuationListener,
+                visionSession = visionSession,
                 publishRuntimeState = publishRuntimeState,
                 prewarmCapabilitySnapshot = { snapshots.capabilitySnapshot() },
                 monotonicNanos = monotonicNanos,
@@ -352,6 +359,7 @@ class AndroidConsoleRuntime(
             }
             runCatching { executor.close() }.onFailure { cleanupFailed = true }
             runCatching { scheduler.close() }.onFailure { cleanupFailed = true }
+            runCatching { visionSessionForCleanup?.awaitClosed() }.onFailure { cleanupFailed = true }
             runCatching { audit.close() }.onFailure { cleanupFailed = true }
             runCatching { agent.shutdown() }.onFailure { cleanupFailed = true }
             synchronized(lifecycleLock) {
@@ -390,6 +398,7 @@ class AndroidConsoleRuntime(
         COMPONENTS("components"),
         LISTENERS("listeners"),
         AGENT_CONNECT("agent_connect"),
+        VISION_START("vision_start"),
         LOCKED_RUNTIME_STATE("locked_runtime_state"),
         CONNECTOR("connector"),
         CAPABILITY_PREWARM("capability_prewarm"),
@@ -418,6 +427,7 @@ class AndroidConsoleRuntime(
         private val telemetryListener: TelemetryListener,
         private val connectionListener: ConnectionListener,
         private val actuationListener: FlightControlPortSnapshotListener,
+        private val visionSession: HeadlessOpenCvObservationSession?,
         val publishRuntimeState: () -> Unit,
         private val prewarmCapabilitySnapshot: () -> Unit,
         monotonicNanos: () -> Long,
@@ -445,11 +455,30 @@ class AndroidConsoleRuntime(
             prewarmCapabilitySnapshot.invoke()
         }
 
+        fun startVisionObservation() {
+            val result = visionSession?.start() ?: return
+            if (result is OpenCvObservationStartResult.Failure) {
+                // Bounded enum only. Vision remains observation-only and unavailable; console
+                // authority is neither granted nor revoked by recognition availability.
+                runCatching {
+                    Log.w(LOG_TAG, "vision_start_unavailable reason=${result.reason.name.lowercase()}")
+                }
+            }
+        }
+
         fun closeActuationAdmission() {
             core.closeActuationAdmission()
+            visionSession?.requestStop()
         }
 
         private fun cleanupAfterNeutral() {
+            val visionStop =
+                visionSession?.stopWithin(VISION_CLOSE_ATTEMPT_MILLIS)
+                    ?: OpenCvObservationStopResult.CLOSED
+            check(visionStop == OpenCvObservationStopResult.CLOSED) {
+                "OpenCV observation cleanup is incomplete: $visionStop"
+            }
+
             var firstFailure: Throwable? = null
             fun attempt(block: () -> Unit) {
                 runCatching(block).onFailure { failure ->
@@ -459,6 +488,8 @@ class AndroidConsoleRuntime(
 
             // Preserve the reviewed order: core neutral evidence lands before executor/audit and
             // adapter ownership are released.
+            // Vision stop can block on a vendor source or native frame; this method already runs
+            // on AndroidRuntimeCloser's bounded cleanup daemon, never the Android main thread.
             attempt { executor.close() }
             attempt { scheduler.close() }
             if (listenersInstalled.get()) {
@@ -477,6 +508,7 @@ class AndroidConsoleRuntime(
         const val STREAM_ID = "mock-android-main"
         const val SERVER_VERSION = "0.2.0-headless-mock"
         const val CLOSE_AFTER_START_FAILURE_MILLIS = 2_000L
+        const val VISION_CLOSE_ATTEMPT_MILLIS = 2_500L
         const val LOG_TAG = "DroneCompanionHost"
     }
 }

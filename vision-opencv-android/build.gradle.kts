@@ -22,4 +22,5 @@ android {
 
 dependencies {
     api(project(":vision-opencv-core"))
+    implementation("org.opencv:opencv:4.9.0")
 }
