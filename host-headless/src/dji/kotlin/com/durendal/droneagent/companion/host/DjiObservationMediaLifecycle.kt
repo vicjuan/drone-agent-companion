@@ -89,15 +89,13 @@ internal class DjiObservationMediaLifecycle(
             StreamState.BLOCKED,
             -> streamNetworkHandle = null
         }
-        if (streamNetworkHandle == null && streamStartAttempts < MAX_STREAM_START_ATTEMPTS) {
+        if (streamNetworkHandle == null) {
             runCatching { startStream(ethernetBinding) }
                 .onFailure { failure ->
                     streamNetworkHandle = null
                     Log.e(TAG, "DJI RTMP start attempt failed", failure)
                     requestSerialReconcile()
                 }
-        } else if (streamNetworkHandle == null) {
-            Log.e(TAG, "DJI RTMP retry limit reached for the accepted Ethernet generation")
         }
     }
 
@@ -131,11 +129,7 @@ internal class DjiObservationMediaLifecycle(
                 return
             }
         }
-        if (visionStartAttempts >= MAX_VISION_START_ATTEMPTS) {
-            Log.e(TAG, "DJI decoded-frame OpenCV retry limit reached for this hardware generation")
-            return
-        }
-        visionStartAttempts += 1
+        if (visionStartAttempts < Int.MAX_VALUE) visionStartAttempts += 1
         val session =
             HeadlessOpenCvVision.createObservationSession(
                 DecodedFrameStreamFactory(agent::decodedFrameSource),
@@ -148,12 +142,10 @@ internal class DjiObservationMediaLifecycle(
                 Log.e(TAG, "DJI decoded-frame OpenCV observation start failed: ${result.reason}")
                 if (session.stopWithin(VISION_STOP_MILLIS) == OpenCvObservationStopResult.CLOSED) {
                     visionSession = null
-                    if (visionStartAttempts < MAX_VISION_START_ATTEMPTS) {
-                        // A camera decoder can lag the aircraft-connection callback. Retry only
-                        // through the platform owner's serial executor; never recurse on DJI's
-                        // callback thread or overlap a graph that is still closing.
-                        requestSerialReconcile()
-                    }
+                    // A receiver or camera decoder can lag the hardware-ready callback. Retry
+                    // through the platform owner's delayed serial executor; never recurse on a
+                    // DJI callback thread or overlap a graph that is still closing.
+                    requestSerialReconcile()
                 }
             }
         }
@@ -165,7 +157,7 @@ internal class DjiObservationMediaLifecycle(
         // no arbitrary host, route, DNS result or browser input can select a publisher target.
         val peer = binding.policyBinding.operatorPeerIpv4
         val endpoint = "rtmp://$peer:$RTMP_PORT/$RTMP_PATH"
-        streamStartAttempts += 1
+        if (streamStartAttempts < Int.MAX_VALUE) streamStartAttempts += 1
         agent.liveStream.configure(RtmpConfig(endpoint))
         val status = agent.liveStream.start()
         streamNetworkHandle =
@@ -178,7 +170,7 @@ internal class DjiObservationMediaLifecycle(
         if (streamNetworkHandle == null) {
             // A synchronous ERROR/BLOCKED/IDLE result is not guaranteed to produce another
             // status callback. Re-enter only through the platform's serial executor so the
-            // bounded retry count cannot recurse on the DJI callback thread.
+            // retry loop cannot recurse on the DJI callback thread.
             requestSerialReconcile()
         }
     }
@@ -228,7 +220,5 @@ internal class DjiObservationMediaLifecycle(
         const val RTMP_PORT = 1935
         const val RTMP_PATH = "dji-main"
         const val VISION_STOP_MILLIS = 2_000L
-        const val MAX_STREAM_START_ATTEMPTS = 3
-        const val MAX_VISION_START_ATTEMPTS = 3
     }
 }

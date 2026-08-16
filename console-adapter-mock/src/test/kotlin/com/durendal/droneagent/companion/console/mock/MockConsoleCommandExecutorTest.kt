@@ -170,6 +170,7 @@ class MockConsoleCommandExecutorTest {
             authorityDecisionId = "authority-$controlEpoch",
             intentDigestSha256 = "b".repeat(64),
             admittedAtNanos = 1_000L,
+            expiresAtNanos = 251_000_000L,
             controlEpoch = controlEpoch,
         )
 }

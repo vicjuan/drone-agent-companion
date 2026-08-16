@@ -41,9 +41,18 @@ data class AdmittedControlFrame(
     val authorityDecisionId: String,
     val intentDigestSha256: String,
     val admittedAtNanos: Long,
+    /** Exact Core-owned deadline after applying the configured dead-man timeout. */
+    val expiresAtNanos: Long,
     /** Monotonic core epoch fenced by [ConsoleCommandExecutor.neutralize]. */
     val controlEpoch: Long,
-)
+) {
+    init {
+        require(admittedAtNanos >= 0L) { "admittedAtNanos must be non-negative" }
+        require(expiresAtNanos >= admittedAtNanos) {
+            "expiresAtNanos cannot precede admittedAtNanos"
+        }
+    }
+}
 
 /**
  * Companion-owned action boundary. RETURN_TO_HOME is intentionally owned here:

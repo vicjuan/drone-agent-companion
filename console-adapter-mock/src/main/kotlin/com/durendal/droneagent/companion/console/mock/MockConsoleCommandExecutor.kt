@@ -75,6 +75,8 @@ class MockConsoleCommandExecutor(
             synchronized(lock) {
                 when {
                     closed -> ConsoleExecutionResult(false, "mock_executor_closed")
+                    monotonicClock.nowNanos() >= frame.expiresAtNanos ->
+                        ConsoleExecutionResult(false, "control_ttl_expired")
                     frame.controlEpoch <= highestFencedControlEpoch ->
                         ConsoleExecutionResult(false, "control_epoch_fenced")
                     activeLeaseId != null && activeLeaseId != frame.frame.leaseId ->

@@ -4,6 +4,7 @@ import com.durendal.droneagent.companion.console.protocol.AuthenticationPresenta
 import com.durendal.droneagent.companion.console.protocol.ClientHelloPayload
 import com.durendal.droneagent.companion.console.protocol.ConsoleClientMessage
 import com.durendal.droneagent.companion.console.protocol.ConsoleClientPayload
+import com.durendal.droneagent.companion.console.protocol.ConsoleProtocolModule
 import com.durendal.droneagent.companion.console.protocol.ControlFramePayload
 import com.durendal.droneagent.companion.console.protocol.ControlNeutralPayload
 import com.durendal.droneagent.companion.console.protocol.ControlNeutralReason
@@ -40,12 +41,21 @@ class AuthenticatingConsoleClientSessionHandlerTest {
         val inner = RecordingHandler(order)
         val handler = handler(ConsoleSessionRole.OPERATOR, inner, audit)
 
-        handler.onSessionOpened("session-1")
+        openSession(handler, "session-1")
         val token = token()
         handler.onClientMessage("session-1", hello("hello-1", token))
 
-        assertEquals(listOf("audit:authentication_succeeded", "inner:open", "inner:message"), order)
+        assertEquals(
+            listOf(
+                "audit:authentication_succeeded",
+                "inner:open",
+                "inner:protocol",
+                "inner:message",
+            ),
+            order,
+        )
         assertEquals(listOf("session-1"), inner.opened)
+        assertEquals(listOf("session-1" to ConsoleProtocolModule.PROTOCOL_VERSION), inner.selectedVersions)
         val forwarded = inner.messages.single().second
         assertEquals("hello-1", forwarded.messageId)
         assertNull((forwarded.payload as ClientHelloPayload).authentication)
@@ -64,7 +74,7 @@ class AuthenticatingConsoleClientSessionHandlerTest {
             val inner = RecordingHandler()
             val handler = handler(ConsoleSessionRole.OPERATOR, inner, audit)
             val sessionId = "session-$index"
-            handler.onSessionOpened(sessionId)
+            openSession(handler, sessionId)
 
             val error =
                 assertThrows(ConsoleSessionProtocolException::class.java) {
@@ -86,7 +96,7 @@ class AuthenticatingConsoleClientSessionHandlerTest {
         val audit = RecordingAuditSink()
         val inner = RecordingHandler()
         val handler = handler(ConsoleSessionRole.OBSERVER, inner, audit)
-        handler.onSessionOpened("session-1")
+        openSession(handler, "session-1")
         handler.onClientMessage("session-1", hello("hello-1", token()))
 
         privilegedPayloads().forEachIndexed { index, payload ->
@@ -116,7 +126,7 @@ class AuthenticatingConsoleClientSessionHandlerTest {
         val audit = RecordingAuditSink()
         val inner = RecordingHandler()
         val handler = handler(ConsoleSessionRole.OPERATOR, inner, audit)
-        handler.onSessionOpened("session-1")
+        openSession(handler, "session-1")
         handler.onClientMessage("session-1", hello("hello-1", token()))
 
         val lease = ConsoleClientMessage("lease-1", LeaseAcquirePayload(5_000))
@@ -135,7 +145,7 @@ class AuthenticatingConsoleClientSessionHandlerTest {
                 inner = inner,
                 audit = ConsoleAuditSink { throw IllegalStateException("disk unavailable") },
             )
-        handler.onSessionOpened("session-1")
+        openSession(handler, "session-1")
 
         assertThrows(IllegalStateException::class.java) {
             handler.onClientMessage("session-1", hello("hello-1", token()))
@@ -165,7 +175,7 @@ class AuthenticatingConsoleClientSessionHandlerTest {
                         check(releaseAudit.await(2, TimeUnit.SECONDS))
                     },
             )
-        handler.onSessionOpened("session-1")
+        openSession(handler, "session-1")
         val failure = AtomicReference<Throwable?>()
         val authenticationThread =
             Thread {
@@ -201,7 +211,7 @@ class AuthenticatingConsoleClientSessionHandlerTest {
                 },
             )
         val handler = handler(ConsoleSessionRole.OPERATOR, inner, RecordingAuditSink())
-        handler.onSessionOpened("session-1")
+        openSession(handler, "session-1")
         val thread = Thread { handler.onClientMessage("session-1", hello("hello-1", token())) }
         thread.start()
         assertTrue(openEntered.await(1, TimeUnit.SECONDS))
@@ -230,7 +240,7 @@ class AuthenticatingConsoleClientSessionHandlerTest {
                         if (writes > 1) throw IllegalStateException("disk unavailable")
                     },
             )
-        handler.onSessionOpened("session-1")
+        openSession(handler, "session-1")
         handler.onClientMessage("session-1", hello("hello-1", token()))
 
         assertThrows(IllegalStateException::class.java) {
@@ -261,7 +271,7 @@ class AuthenticatingConsoleClientSessionHandlerTest {
                 epochClock = ConsoleEpochClock { 1_700_000_000_000L },
                 monotonicClock = ConsoleMonotonicClock { 123_000_000L },
             )
-        handler.onSessionOpened("session-1")
+        openSession(handler, "session-1")
 
         val error =
             assertThrows(ConsoleSessionProtocolException::class.java) {
@@ -290,7 +300,7 @@ class AuthenticatingConsoleClientSessionHandlerTest {
                 },
             )
         val handler = handler(ConsoleSessionRole.OPERATOR, inner, RecordingAuditSink())
-        handler.onSessionOpened("session-1")
+        openSession(handler, "session-1")
         val firstFailure = AtomicReference<Throwable?>()
         val authenticationThread =
             Thread {
@@ -338,7 +348,7 @@ class AuthenticatingConsoleClientSessionHandlerTest {
                 },
             )
         val handler = handler(ConsoleSessionRole.OPERATOR, inner, RecordingAuditSink())
-        handler.onSessionOpened("session-reused")
+        openSession(handler, "session-reused")
         handler.onClientMessage("session-reused", hello("hello-old", token()))
         val oldFailure = AtomicReference<Throwable?>()
         val oldThread =
@@ -367,7 +377,7 @@ class AuthenticatingConsoleClientSessionHandlerTest {
         assertNull(oldFailure.get())
         assertEquals(listOf("session-reused" to "old_peer_closed"), inner.closed)
 
-        handler.onSessionOpened("session-reused")
+        openSession(handler, "session-reused")
         handler.onSessionClosed("session-reused", "new_pre_auth_close")
         assertEquals(listOf("session-reused" to "old_peer_closed"), inner.closed)
     }
@@ -394,6 +404,14 @@ class AuthenticatingConsoleClientSessionHandlerTest {
             epochClock = ConsoleEpochClock { 1_700_000_000_000L },
             monotonicClock = ConsoleMonotonicClock { 123_000_000L },
         )
+    }
+
+    private fun openSession(
+        handler: ConsoleClientSessionHandler,
+        sessionId: String,
+    ) {
+        handler.onSessionOpened(sessionId)
+        handler.onProtocolSelected(sessionId, ConsoleProtocolModule.PROTOCOL_VERSION)
     }
 
     private fun hello(
@@ -455,6 +473,7 @@ class AuthenticatingConsoleClientSessionHandlerTest {
         private val onMessage: (ConsoleClientMessage) -> Unit = {},
     ) : ConsoleClientSessionHandler {
         val opened = CopyOnWriteArrayList<String>()
+        val selectedVersions = CopyOnWriteArrayList<Pair<String, String>>()
         val messages = CopyOnWriteArrayList<Pair<String, ConsoleClientMessage>>()
         val closed = CopyOnWriteArrayList<Pair<String, String>>()
 
@@ -462,6 +481,14 @@ class AuthenticatingConsoleClientSessionHandlerTest {
             opened += sessionId
             order?.add("inner:open")
             onOpen()
+        }
+
+        override fun onProtocolSelected(
+            sessionId: String,
+            selectedProtocolVersion: String,
+        ) {
+            selectedVersions += sessionId to selectedProtocolVersion
+            order?.add("inner:protocol")
         }
 
         override fun onClientMessage(
