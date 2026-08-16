@@ -1,6 +1,8 @@
 package com.durendal.droneagent.companion.console.server
 
 import com.durendal.droneagent.companion.console.protocol.ConsoleProtocolModule
+import com.durendal.droneagent.companion.console.protocol.ActuationLockState
+import com.durendal.droneagent.companion.console.protocol.AdapterKind
 import com.durendal.droneagent.core.control.BodyFrameVelocityCommand
 import com.durendal.droneagent.core.control.CommandEnvelope
 import com.durendal.droneagent.core.control.CommandSaturationGate
@@ -8,6 +10,7 @@ import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
 
 data class ConsoleServerCoreConfig(
@@ -46,8 +49,12 @@ class ConsoleServerCore(
     private val eventSink: ConsoleEventSink,
     initialActuationReadiness: ConsoleActuationReadinessSnapshot =
         ConsoleActuationReadinessSnapshot.UNAVAILABLE,
+    initialActuationObservation: ConsoleActuationObservation =
+        ConsoleActuationObservation.UNAVAILABLE,
     /** Must return a process-lifetime unique protocol identifier; production uses UUIDs. */
     private val leaseIdFactory: () -> String = { UUID.randomUUID().toString() },
+    private val commissioningLifecycle: ConsoleCommissioningLifecycle =
+        ConsoleCommissioningLifecycle(),
 ) : AutoCloseable {
     private val lock = Any()
     /**
@@ -70,7 +77,7 @@ class ConsoleServerCore(
     private val actuationAdmissionClosed = AtomicBoolean(false)
 
     private var activeLease: ActiveLease? = null
-    private var pendingLeaseSessionId: String? = null
+    private var pendingLease: PendingLeaseReservation? = null
     private var nextLeaseEpoch = 0L
     private var nextControlEpoch = 0L
     private var nextNeutralToken = 0L
@@ -85,8 +92,28 @@ class ConsoleServerCore(
     private var activeDiscreteCommandId: String? = null
     private var actuationReadiness = initialActuationReadiness
     private var readinessEpoch = 0L
+    /** Shared adapter/connection/profile truth always comes from [actuationReadiness]. */
+    private var hardwareAdapterActuationReady =
+        initialActuationObservation.adapterActuationReady &&
+            initialActuationObservation.adapter == initialActuationReadiness.adapter &&
+            initialActuationObservation.aircraftConnection == initialActuationReadiness.aircraftConnection &&
+            initialActuationObservation.operatingProfile == initialActuationReadiness.operatingProfile
+    private var observationEpoch = 0L
+    /** A committed generation stays ineffective until its deadline task is durably attached. */
+    private var commissioningActivationPending = false
+    /** Blocks all lease authority until every overlapping terminal evidence owner has finished. */
+    private val commissioningTransitionTokens = mutableSetOf<Long>()
+    /** Fences a start reservation against a concurrent revoke/start transition. */
+    private var commissioningAuthorityEpoch = 0L
+    /** Required audit failed while another transition owned the safety linearization point. */
+    private var auditTerminalizationDeferred = false
+    private var commissioningDeadlineTask: ConsoleScheduledTask? = null
+    private var commissioningScheduleEpoch = 0L
     private var shutdownNeutralToken: Long? = null
     private var shutdownNeutralSucceeded = false
+    private var shutdownNeutralFinished = false
+    private var shutdownEvidenceFinished = false
+    private var pendingShutdownEvidenceWork: (() -> Unit)? = null
     private var shutdownRetryAttempted = false
     private var closed = false
 
@@ -128,6 +155,248 @@ class ConsoleServerCore(
     }
 
     /**
+     * Host-only entrypoint. No console protocol, HTTP or WebSocket handler maps to this method.
+     * Required start evidence is durable before the reserved generation can become effective.
+     */
+    fun startHardwareCommissioning(
+        operatorSessionId: String,
+        allowedIntents: Set<ConsoleActuationIntent>,
+        ttlMillis: Long,
+    ): ConsoleCommissioningStartResult {
+        if (actuationAdmissionClosed.get()) return refusedCommissioningStart(ConsoleCommissioningStartDecision.SERVER_CLOSED)
+        expireDueWork()
+        val snapshot = synchronized(lock) {
+            when {
+                closed || actuationAdmissionClosed.get() -> null
+                auditFault -> null
+                operatorSessionId !in sessions ->
+                    CommissioningStartSnapshot(
+                        currentActuationObservationLocked(),
+                        readinessEpoch,
+                        observationEpoch,
+                        commissioningAuthorityEpoch,
+                        operatorSession = null,
+                    )
+                commissioningTransitionTokens.isNotEmpty() || activeLease != null || activeDiscreteCommandId != null ||
+                    neutralBarrierToken != null || neutralFault != null -> null
+                else ->
+                    CommissioningStartSnapshot(
+                        currentActuationObservationLocked(),
+                        readinessEpoch,
+                        observationEpoch,
+                        commissioningAuthorityEpoch,
+                        operatorSession = sessions[operatorSessionId],
+                    )
+            }
+        } ?: return refusedCommissioningStart(
+            synchronized(lock) {
+                if (auditFault) ConsoleCommissioningStartDecision.AUDIT_UNAVAILABLE
+                else if (closed || actuationAdmissionClosed.get()) ConsoleCommissioningStartDecision.SERVER_CLOSED
+                else ConsoleCommissioningStartDecision.STATE_CHANGED
+            },
+        )
+
+        // UUID generation belongs to the lifecycle, but reserveStart is deliberately outside the
+        // Core lock so no injected/test factory can become a callback-under-lock hazard.
+        val commissioningId = commissioningLifecycle.generateCommissioningId()
+        val reservationResult =
+            commissioningLifecycle.reserveStart(
+                commissioningId,
+                snapshot.observation,
+                operatorSessionId,
+                snapshot.operatorSession != null,
+                allowedIntents,
+                ttlMillis,
+            )
+        val reservation = reservationResult.reservation
+            ?: return refusedCommissioningStart(checkNotNull(reservationResult.refusal))
+
+        // Linearize a cross-profile authority fence before the required STARTED audit. Nothing
+        // (including mock authority) may overtake the reservation while its causal evidence is
+        // blocked. The token is handed off to commissioningActivationPending only after commit.
+        val startTransitionToken = synchronized(actuationDispatchLock) {
+            synchronized(lock) {
+                val stillCurrent =
+                    !closed && !actuationAdmissionClosed.get() && !auditFault &&
+                        sessions[operatorSessionId] === snapshot.operatorSession &&
+                        commissioningTransitionTokens.isEmpty() &&
+                        commissioningAuthorityEpoch == snapshot.commissioningAuthorityEpoch &&
+                        activeLease == null && activeDiscreteCommandId == null &&
+                        neutralBarrierToken == null && neutralFault == null &&
+                        readinessEpoch == snapshot.readinessEpoch &&
+                        observationEpoch == snapshot.observationEpoch &&
+                        commissioningPublicLockIsSafeLocked() &&
+                        currentActuationObservationLocked().isEligibleForG520Commissioning()
+                if (stillCurrent) beginCommissioningTransitionLocked() else null
+            }
+        }
+        if (startTransitionToken == null) {
+            commissioningLifecycle.abort(reservation)
+            return refusedCommissioningStart(
+                synchronized(lock) {
+                    when {
+                        auditFault -> ConsoleCommissioningStartDecision.AUDIT_UNAVAILABLE
+                        closed || actuationAdmissionClosed.get() ->
+                            ConsoleCommissioningStartDecision.SERVER_CLOSED
+                        else -> ConsoleCommissioningStartDecision.STATE_CHANGED
+                    }
+                },
+            )
+        }
+
+        val startEvidence =
+            audit(
+                ConsoleAuditKind.COMMISSIONING_STARTED,
+                sessionId = operatorSessionId,
+                subjectId = reservation.commissioningId,
+                outcome = "reservation_recorded",
+                reason = "hardware_commissioning",
+                detail = commissioningAuditDetail(reservation),
+            )
+        if (!recordRequired(startEvidence)) {
+            try {
+                commissioningLifecycle.abort(reservation)
+            } finally {
+                completeCommissioningTransition(startTransitionToken)
+            }
+            return refusedCommissioningStart(ConsoleCommissioningStartDecision.AUDIT_UNAVAILABLE)
+        }
+
+        val commit = synchronized(actuationDispatchLock) {
+            synchronized(lock) {
+                val stillCurrent =
+                    !closed && !actuationAdmissionClosed.get() && !auditFault &&
+                        sessions[operatorSessionId] === snapshot.operatorSession &&
+                        commissioningTransitionTokens.size == 1 &&
+                        startTransitionToken in commissioningTransitionTokens &&
+                        commissioningAuthorityEpoch == startTransitionToken &&
+                        activeLease == null &&
+                        activeDiscreteCommandId == null && neutralBarrierToken == null &&
+                        neutralFault == null && readinessEpoch == snapshot.readinessEpoch &&
+                        observationEpoch == snapshot.observationEpoch &&
+                        commissioningPublicLockIsSafeLocked() &&
+                        currentActuationObservationLocked().isEligibleForG520Commissioning()
+                if (!stillCurrent) {
+                    null
+                } else {
+                    commissioningLifecycle.commit(reservation, monotonicClock.nowNanos())
+                        .takeIf { it.decision == ConsoleCommissioningCommitDecision.COMMITTED }
+                        ?.also { commissioningActivationPending = true }
+                }
+            }
+        }
+        if (commit == null) {
+            // Keep the reservation occupied until its required abort evidence finishes so a
+            // replacement commissioning or mock authority cannot overtake the causal record.
+            val abortRecorded =
+                try {
+                    recordRequired(
+                        audit(
+                            ConsoleAuditKind.COMMISSIONING_TERMINATED,
+                            sessionId = operatorSessionId,
+                            subjectId = reservation.commissioningId,
+                            outcome = "start_aborted",
+                            reason = "state_changed",
+                            detail = commissioningAuditDetail(reservation),
+                        ),
+                    )
+                } finally {
+                    commissioningLifecycle.abort(reservation)
+                    completeCommissioningTransition(startTransitionToken)
+                }
+            return refusedCommissioningStart(
+                if (abortRecorded) ConsoleCommissioningStartDecision.STATE_CHANGED
+                else ConsoleCommissioningStartDecision.AUDIT_UNAVAILABLE,
+            )
+        }
+        completeCommissioningTransition(startTransitionToken)
+        val session = checkNotNull(commit.session)
+        when (scheduleCommissioningDeadline(session)) {
+            CommissioningDeadlineAttachDecision.ATTACHED -> Unit
+            CommissioningDeadlineAttachDecision.SCHEDULER_UNAVAILABLE -> {
+                terminateCommissioning(
+                    expectedSession = session,
+                    reason = ConsoleCommissioningTerminationReason.DEADLINE_UNAVAILABLE,
+                )
+                return refusedCommissioningStart(ConsoleCommissioningStartDecision.DEADLINE_UNAVAILABLE)
+            }
+            CommissioningDeadlineAttachDecision.EXPIRED_CURRENT -> {
+                terminateCommissioning(
+                    expectedSession = session,
+                    reason = ConsoleCommissioningTerminationReason.TTL_EXPIRED,
+                )
+                return refusedCommissioningStart(ConsoleCommissioningStartDecision.STATE_CHANGED)
+            }
+            CommissioningDeadlineAttachDecision.STATE_CHANGED_OR_REVOKED -> {
+                terminateCommissioning(
+                    expectedSession = session,
+                    reason = ConsoleCommissioningTerminationReason.RUNTIME_STATE_CHANGED,
+                )
+                return refusedCommissioningStart(ConsoleCommissioningStartDecision.STATE_CHANGED)
+            }
+        }
+        return ConsoleCommissioningStartResult(ConsoleCommissioningStartDecision.STARTED, session)
+    }
+
+    /** Host-only explicit terminal revoke. A stale view cannot affect a replacement generation. */
+    fun revokeHardwareCommissioning(
+        expectedSession: ConsoleCommissioningSessionView,
+    ): ConsoleCommissioningRevokeDecision {
+        expireDueWork()
+        val prepared =
+            prepareCommissioningTermination(
+                expectedSession,
+                ConsoleCommissioningTerminationReason.HOST_REVOKED,
+            )
+        return when {
+            prepared.transition != null -> {
+                if (finishCommissioningTermination(checkNotNull(prepared.transition))) {
+                    ConsoleCommissioningRevokeDecision.REVOKED
+                } else {
+                    ConsoleCommissioningRevokeDecision.REVOKED_AUDIT_UNAVAILABLE
+                }
+            }
+            prepared.stale -> ConsoleCommissioningRevokeDecision.STALE_SESSION
+            else -> ConsoleCommissioningRevokeDecision.NO_ACTIVE_SESSION
+        }
+    }
+
+    /**
+     * Host-only adapter-ready observation. Adapter/connection/profile must exactly match the
+     * browser-visible runtime snapshot; only the additional ready bit is stored independently.
+     */
+    fun updateActuationObservation(next: ConsoleActuationObservation): Boolean {
+        var transition: CommissioningTermination? = null
+        val accepted = synchronized(actuationDispatchLock) {
+            synchronized(lock) {
+                if (closed) {
+                    false
+                } else {
+                    val sharedTruthMatches =
+                        next.adapter == actuationReadiness.adapter &&
+                            next.aircraftConnection == actuationReadiness.aircraftConnection &&
+                            next.operatingProfile == actuationReadiness.operatingProfile
+                    val nextReady = sharedTruthMatches && next.adapterActuationReady
+                    if (nextReady != hardwareAdapterActuationReady || !sharedTruthMatches) {
+                        hardwareAdapterActuationReady = nextReady
+                        observationEpoch = nextCounter(observationEpoch, "actuation observation epoch")
+                        if (!nextReady) {
+                            transition =
+                                prepareCommissioningTerminationLocked(
+                                    expectedSession = null,
+                                    reason = ConsoleCommissioningTerminationReason.OBSERVATION_LOST,
+                                ).transition
+                        }
+                    }
+                    sharedTruthMatches
+                }
+            }
+        }
+        transition?.let(::finishCommissioningTermination)
+        return accepted
+    }
+
+    /**
      * Replace host-owned runtime truth. Browser messages have no path to this method. Every actual
      * context change advances an internal epoch, revokes an active lease and enters neutral before
      * the method returns. That epoch also fences commands which are waiting on an asynchronous
@@ -135,14 +404,35 @@ class ConsoleServerCore(
      */
     fun updateActuationReadiness(next: ConsoleActuationReadinessSnapshot): Boolean {
         val transition = synchronized(actuationDispatchLock) {
-            synchronized(lock) {
+            synchronized(lock) state@{
                 if (closed || next == actuationReadiness) {
                     null
                 } else {
                     val previous = actuationReadiness
                     actuationReadiness = next
                     readinessEpoch = nextCounter(readinessEpoch, "actuation readiness epoch")
-                    pendingLeaseSessionId = null
+                    if (hardwareAdapterActuationReady) {
+                        hardwareAdapterActuationReady = false
+                        observationEpoch = nextCounter(observationEpoch, "actuation observation epoch")
+                    }
+                    pendingLease = null
+
+                    val commissioningTermination =
+                        prepareCommissioningTerminationLocked(
+                            expectedSession = null,
+                            reason = ConsoleCommissioningTerminationReason.RUNTIME_STATE_CHANGED,
+                        ).transition
+
+                    if (commissioningTermination != null) {
+                        return@state ReadinessTransition(
+                            previous = previous,
+                            next = next,
+                            revokedLease = commissioningTermination.revokedLease,
+                            neutral = commissioningTermination.neutral,
+                            commandTermination = commissioningTermination.commandTermination,
+                            commissioningTermination = commissioningTermination,
+                        )
+                    }
 
                     val actionRecord =
                         activeDiscreteCommandId?.let(commands::get)
@@ -176,9 +466,30 @@ class ConsoleServerCore(
             }
         } ?: return synchronized(lock) { !closed }
 
+        transition.commissioningTermination?.let { commissioning ->
+            val evidenceToken = synchronized(lock) { beginCommissioningTransitionLocked() }
+            return try {
+                val terminalRecorded = finishCommissioningTermination(commissioning)
+                val readinessRecorded =
+                    recordBestEffort(
+                        audit(
+                            ConsoleAuditKind.ACTUATION_READINESS_CHANGED,
+                            sessionId = commissioning.session.operatorSessionId,
+                            leaseId = commissioning.revokedLease?.leaseId,
+                            outcome = "runtime_context_changed",
+                            reason = transition.next.summaryCode(),
+                            detail = "previous=${transition.previous.summaryCode()}",
+                        ),
+                    )
+                terminalRecorded && readinessRecorded
+            } finally {
+                completeCommissioningTransition(evidenceToken)
+            }
+        }
+
         val afterBarrierInvoked = {
             transition.revokedLease?.let(::cancelLeaseTasks)
-            transition.commandTermination?.deadlineTask?.cancel()
+            cancelBestEffort(transition.commandTermination?.deadlineTask)
             transition.commandTermination?.actionLease?.let(::cancelLeaseTasks)
             val affectedLease =
                 transition.revokedLease ?: transition.commandTermination?.actionLease
@@ -223,6 +534,7 @@ class ConsoleServerCore(
             return refusedLease(sessionId, ACTUATION_ADMISSION_CLOSED_REASON)
         }
         expireDueWork()
+        var selectedReservation: PendingLeaseReservation? = null
         val denial = synchronized(lock) {
             when {
                 closed -> "server_closed"
@@ -231,14 +543,24 @@ class ConsoleServerCore(
                 requestedTtlMillis !in config.minimumLeaseTtlMillis..config.maximumLeaseTtlMillis -> "invalid_lease_ttl"
                 auditFault -> "audit_unavailable"
                 neutralFault != null -> "actuation_locked"
-                !actuationReadiness.allowsLease(sessionId) -> "actuation_not_ready"
                 activeDiscreteCommandId != null -> "discrete_action_in_progress"
                 neutralBarrierToken != null -> "neutral_in_progress"
                 activeLease != null -> "lease_held"
-                pendingLeaseSessionId != null -> "lease_pending"
+                pendingLease != null -> "lease_pending"
                 else -> {
-                    pendingLeaseSessionId = sessionId
-                    null
+                    val authority = newLeaseAuthorityLocked(sessionId)
+                    if (authority == null) {
+                        "actuation_not_ready"
+                    } else {
+                        val reservation =
+                            PendingLeaseReservation(
+                                session = checkNotNull(sessions[sessionId]),
+                                authority = authority,
+                            )
+                        selectedReservation = reservation
+                        pendingLease = reservation
+                        null
+                    }
                 }
             }
         }
@@ -249,16 +571,19 @@ class ConsoleServerCore(
                 leaseIdFactory().also { requireValidId(it, "leaseId") }
             } catch (_: Exception) {
                 synchronized(lock) {
-                    if (pendingLeaseSessionId == sessionId) pendingLeaseSessionId = null
+                    if (pendingLease === selectedReservation) pendingLease = null
                 }
                 return refusedLease(sessionId, "lease_id_unavailable")
             }
+        val reservation = checkNotNull(selectedReservation)
         val candidate = synchronized(lock) {
             nextLeaseEpoch = nextCounter(nextLeaseEpoch, "lease epoch")
             nextControlEpoch = nextCounter(nextControlEpoch, "control epoch")
             ActiveLease(
                 leaseId = leaseId,
                 holderSessionId = sessionId,
+                commissioningSession =
+                    (reservation.authority as? LeaseAuthority.Commissioning)?.session,
                 leaseEpoch = nextLeaseEpoch,
                 deadlineNanos = 0L,
                 controlEpoch = nextControlEpoch,
@@ -273,29 +598,31 @@ class ConsoleServerCore(
             )
         if (!recordRequired(admittedAudit)) {
             synchronized(lock) {
-                if (pendingLeaseSessionId == sessionId) pendingLeaseSessionId = null
+                if (pendingLease === reservation) pendingLease = null
             }
             return refusedLease(sessionId, "audit_unavailable")
         }
 
         val committed = synchronized(lock) {
-            if (closed || actuationAdmissionClosed.get() || sessionId !in sessions || activeLease != null ||
-                pendingLeaseSessionId != sessionId || !actuationReadiness.allowsLease(sessionId)
+            if (closed || actuationAdmissionClosed.get() ||
+                sessions[sessionId] !== reservation.session || activeLease != null ||
+                pendingLease !== reservation || !leaseAuthorityAllowsLocked(candidate)
             ) {
-                pendingLeaseSessionId = null
+                if (pendingLease === reservation) pendingLease = null
                 false
             } else {
-                pendingLeaseSessionId = null
+                pendingLease = null
                 candidate.deadlineNanos =
                     deadlineAfter(monotonicClock.nowNanos(), requestedTtlMillis)
+                candidate.deadlineAttachPending = true
                 activeLease = candidate
                 true
             }
         }
         if (!committed) return refusedLease(sessionId, "state_changed")
+        if (!scheduleLeaseDeadline(candidate)) return refusedLease(sessionId, "lease_deadline_unavailable")
         val held = heldLease(candidate, monotonicClock.nowNanos())
         emit(sessionId, ConsoleCoreEvent.LeaseChanged(held))
-        if (!scheduleLeaseDeadline(candidate)) return refusedLease(sessionId, "lease_deadline_unavailable")
         return held
     }
 
@@ -317,8 +644,8 @@ class ConsoleServerCore(
                 requestedTtlMillis !in config.minimumLeaseTtlMillis..config.maximumLeaseTtlMillis -> null to "invalid_lease_ttl"
                 auditFault -> null to "audit_unavailable"
                 neutralFault != null -> null to "actuation_locked"
-                !actuationReadiness.allowsLease(sessionId) -> null to "actuation_not_ready"
                 lease == null || lease.leaseId != leaseId || lease.holderSessionId != sessionId -> null to "not_lease_holder"
+                !leaseAuthorityAllowsLocked(lease) -> null to "actuation_not_ready"
                 lease.mutationPending -> null to "lease_busy"
                 else -> {
                     lease.mutationPending = true
@@ -349,7 +676,7 @@ class ConsoleServerCore(
                 val now = monotonicClock.nowNanos()
                 when {
                     closed || actuationAdmissionClosed.get() || activeLease !== lease || sessionId !in sessions ||
-                        !actuationReadiness.allowsLease(sessionId) -> {
+                        !leaseAuthorityAllowsLocked(lease) -> {
                         lease.mutationPending = false
                         false
                     }
@@ -384,6 +711,7 @@ class ConsoleServerCore(
                         lease.deadlineNanos = deadlineAfter(now, requestedTtlMillis)
                         lease.leaseEpoch = nextCounter(lease.leaseEpoch, "lease epoch")
                         lease.mutationPending = false
+                        lease.deadlineAttachPending = true
                         oldTask = lease.leaseTask
                         lease.leaseTask = null
                         true
@@ -391,18 +719,18 @@ class ConsoleServerCore(
                 }
             }
         }
-        oldTask?.cancel()
+        cancelBestEffort(oldTask)
         if (!committed) {
-            commandTermination?.deadlineTask?.cancel()
+            cancelBestEffort(commandTermination?.deadlineTask)
             expiredTransition?.let(::expireLease)
             return refusedLease(
                 sessionId,
                 if (expiredTransition == null) "state_changed" else "lease_ttl_expired",
             )
         }
+        if (!scheduleLeaseDeadline(lease)) return refusedLease(sessionId, "lease_deadline_unavailable")
         val held = heldLease(lease, monotonicClock.nowNanos())
         emit(sessionId, ConsoleCoreEvent.LeaseChanged(held))
-        if (!scheduleLeaseDeadline(lease)) return refusedLease(sessionId, "lease_deadline_unavailable")
         return held
     }
 
@@ -453,9 +781,9 @@ class ConsoleServerCore(
                 expiresInMillis = null,
                 reason = null,
             )
-        val afterBarrierInvoked = {
+        val afterBarrierInvoked: () -> Unit = {
             cancelLeaseTasks(transition.lease)
-            commandTermination?.deadlineTask?.cancel()
+            cancelBestEffort(commandTermination?.deadlineTask)
             recordBestEffort(
                 audit(
                     ConsoleAuditKind.LEASE_RELEASED,
@@ -538,10 +866,12 @@ class ConsoleServerCore(
                             val record =
                                 CommandRecord(
                                     sessionId = sessionId,
+                                    session = checkNotNull(sessions[sessionId]),
                                     command = command,
                                     intentDigestSha256 = decision.intentDigestSha256,
                                     authorityDecisionId = decision.authorityDecisionId,
                                     readinessEpoch = readinessEpoch,
+                                    commissioningSession = checkNotNull(activeLease).commissioningSession,
                                     deadlineNanos = deadline,
                                 )
                             commands[command.commandId] = record
@@ -621,8 +951,10 @@ class ConsoleServerCore(
             val rule =
                 commandRuleLocked(sessionId, command.leaseId, command.action, command.ttlMillis)
             if (record !== (reservation as CommandReservation.New).record ||
-                record.state != CommandRecordState.AUDITING || !rule.accepted ||
-                record.readinessEpoch != readinessEpoch || monotonicClock.nowNanos() >= deadline
+                record.state != CommandRecordState.AUDITING ||
+                sessions[sessionId] !== record.session || !rule.accepted ||
+                !commandAuthorityAllowsLocked(record, command.action.actuationIntent) ||
+                monotonicClock.nowNanos() >= deadline
             ) {
                 commands.remove(command.commandId, record)
                 false
@@ -704,10 +1036,11 @@ class ConsoleServerCore(
             }
         }
         if (!scheduleCommandDeadline(commandRecord)) {
+            val expired = monotonicClock.nowNanos() >= commandRecord.deadlineNanos
             terminateCommandForDeadline(
                 commandRecord,
-                reason = "command_deadline_unavailable",
-                timedOut = false,
+                reason = if (expired) "command_ttl_expired" else "command_deadline_unavailable",
+                timedOut = expired,
                 latchUnknownActuation = false,
                 afterBarrierInvoked = afterBarrierInvoked,
             )
@@ -794,9 +1127,11 @@ class ConsoleServerCore(
                     closed -> DiscreteDispatchAttempt.Refused("server_closed")
                     actuationAdmissionClosed.get() ->
                         DiscreteDispatchAttempt.Refused(ACTUATION_ADMISSION_CLOSED_REASON)
-                    record.readinessEpoch != readinessEpoch ->
+                    sessions[record.sessionId]?.let { it !== record.session } == true ->
+                        DiscreteDispatchAttempt.Refused("authority_lost")
+                    record.commissioningSession == null && record.readinessEpoch != readinessEpoch ->
                         DiscreteDispatchAttempt.Refused("actuation_readiness_changed")
-                    !actuationReadiness.allows(command.sessionId, command.command.action.actuationIntent) ->
+                    !commandAuthorityAllowsLocked(record, command.command.action.actuationIntent) ->
                         DiscreteDispatchAttempt.Refused("actuation_not_ready")
                     command.command.action == ConsoleDiscreteAction.TAKEOFF &&
                         !takeoffAuthorityIsLiveLocked(record, command) ->
@@ -954,6 +1289,7 @@ class ConsoleServerCore(
                         ),
                     inputVersion = current.inputVersion,
                     readinessEpoch = readinessEpoch,
+                    commissioningSession = current.commissioningSession,
                 )
             }
         } ?: return refusedControl(
@@ -964,12 +1300,16 @@ class ConsoleServerCore(
             decision.authorityDecisionId,
         )
 
-        executable.oldTask?.cancel()
+        cancelBestEffort(executable.oldTask)
         if (!scheduleControlDeadline(executable.lease, executable.inputVersion, deadline)) {
             return refusedControl(
                 sessionId,
                 frame,
-                "control_deadline_unavailable",
+                if (monotonicClock.nowNanos() >= deadline) {
+                    "control_ttl_expired"
+                } else {
+                    "control_deadline_unavailable"
+                },
                 decision.intentDigestSha256,
                 decision.authorityDecisionId,
             )
@@ -1006,11 +1346,8 @@ class ConsoleServerCore(
                             )
                         false
                     }
-                    executable.readinessEpoch != readinessEpoch ||
-                        !actuationReadiness.allows(
-                            executable.admitted.sessionId,
-                            ConsoleActuationIntent.VIRTUAL_STICK,
-                        ) || neutralBarrierToken != null || activeDiscreteCommandId != null ||
+                    !controlAuthorityAllowsLocked(executable) ||
+                        neutralBarrierToken != null || activeDiscreteCommandId != null ||
                         auditFault || neutralFault != null || closed -> false
                     actuationAdmissionClosed.get() -> {
                         admissionClosedBeforeSubmit = true
@@ -1102,7 +1439,7 @@ class ConsoleServerCore(
                 checkNotNull(selectionReason),
                 null,
             )
-        oldTask?.cancel()
+        cancelBestEffort(oldTask)
         if (plan == null) {
             return refusedControl(
                 sessionId,
@@ -1116,12 +1453,24 @@ class ConsoleServerCore(
     }
 
     fun disconnect(sessionId: String) {
+        var commissioningTermination: CommissioningTermination? = null
         var disconnectNeutral: NeutralPlan? = null
         var commandTermination: CommandAuthorityTermination? = null
         val transition = synchronized(actuationDispatchLock) {
-            synchronized(lock) {
-                val removed = sessions.remove(sessionId) ?: return
-                if (pendingLeaseSessionId == sessionId) pendingLeaseSessionId = null
+            synchronized(lock) state@{
+                val opened = sessions[sessionId] ?: return
+                commissioningLifecycle.currentSession()
+                    ?.takeIf { it.operatorSessionId == sessionId }
+                    ?.let { current ->
+                        commissioningTermination =
+                            prepareCommissioningTerminationLocked(
+                                expectedSession = current,
+                                reason = ConsoleCommissioningTerminationReason.OPERATOR_DISCONNECTED,
+                            ).transition
+                    }
+                val removed = checkNotNull(sessions.remove(sessionId))
+                if (pendingLease?.session === removed) pendingLease = null
+                if (commissioningTermination != null) return@state null
                 val invokedRecord =
                     activeDiscreteCommandId?.let(commands::get)
                         ?.takeIf {
@@ -1163,9 +1512,25 @@ class ConsoleServerCore(
                 }
             }
         }
+        commissioningTermination?.let { commissioning ->
+            val evidenceToken = synchronized(lock) { beginCommissioningTransitionLocked() }
+            try {
+                finishCommissioningTermination(commissioning)
+                recordBestEffort(
+                    audit(
+                        ConsoleAuditKind.SESSION_DISCONNECTED,
+                        sessionId,
+                        outcome = "disconnected",
+                    ),
+                )
+            } finally {
+                completeCommissioningTransition(evidenceToken)
+            }
+            return
+        }
         val afterBarrierInvoked = {
             transition?.let { cancelLeaseTasks(it.lease) }
-            commandTermination?.deadlineTask?.cancel()
+            cancelBestEffort(commandTermination?.deadlineTask)
             commandTermination?.actionLease?.let(::cancelLeaseTasks)
             recordBestEffort(audit(ConsoleAuditKind.SESSION_DISCONNECTED, sessionId, outcome = "disconnected"))
             if (transition != null) {
@@ -1199,11 +1564,19 @@ class ConsoleServerCore(
     fun currentLease(): ConsoleLeaseState? {
         expireDueWork()
         val now = monotonicClock.nowNanos()
-        return synchronized(lock) { activeLease?.let { heldLease(it, now) } }
+        return synchronized(lock) {
+            activeLease?.takeUnless { it.deadlineAttachPending }?.let { heldLease(it, now) }
+        }
     }
 
     override fun close() {
         closeActuationAdmission()
+        // The terminal admission fence above prevents a replacement generation while the
+        // required terminal audit blocks. The helper revokes authority under dispatch -> state
+        // lock and invokes fresh neutral before that audit.
+        terminateCommissioning(
+            reason = ConsoleCommissioningTerminationReason.SERVER_CLOSED,
+        )
         var cancelledCommands: List<CommandRecord> = emptyList()
         var commandTasks: List<ConsoleScheduledTask> = emptyList()
         var stopNeutral: NeutralPlan? = null
@@ -1211,7 +1584,7 @@ class ConsoleServerCore(
             synchronized(lock) {
                 if (closed) return
                 closed = true
-                pendingLeaseSessionId = null
+                pendingLease = null
                 pendingSessions.clear()
                 sessions.clear()
                 val invokedActionLease =
@@ -1265,40 +1638,49 @@ class ConsoleServerCore(
                             prepareNeutralRetryLocked(it, ConsoleSafetyTrigger.SERVER_STOP)
                         }
                 shutdownNeutralToken = stopNeutral?.token
-                if (stopNeutral == null) shutdownNeutralSucceeded = true
+                if (stopNeutral == null) {
+                    shutdownNeutralSucceeded = true
+                    shutdownNeutralFinished = true
+                }
                 lease?.let { LeaseTransition(it, stopNeutral) }
             }
         }
-        val afterBarrierInvoked = {
-            commandTasks.forEach(ConsoleScheduledTask::cancel)
-            transition?.let { cancelLeaseTasks(it.lease) }
-            cancelledCommands.forEach { record ->
-                recordBestEffort(
-                    audit(
-                        ConsoleAuditKind.COMMAND_COMPLETED,
-                        record.sessionId,
-                        record.command.leaseId,
-                        record.command.commandId,
-                        record.intentDigestSha256,
-                        outcome = "cancelled",
-                        reason = "server_stopped",
-                        authorityDecisionId = record.authorityDecisionId,
-                    ),
-                )
+        val finishShutdownEvidence = {
+            try {
+                commandTasks.forEach(::cancelBestEffort)
+                transition?.let { cancelLeaseTasks(it.lease) }
+                cancelledCommands.forEach { record ->
+                    recordBestEffort(
+                        audit(
+                            ConsoleAuditKind.COMMAND_COMPLETED,
+                            record.sessionId,
+                            record.command.leaseId,
+                            record.command.commandId,
+                            record.intentDigestSha256,
+                            outcome = "cancelled",
+                            reason = "server_stopped",
+                            authorityDecisionId = record.authorityDecisionId,
+                        ),
+                    )
+                }
+                recordBestEffort(audit(ConsoleAuditKind.SERVER_STOPPED, outcome = "stop_initiated"))
+            } finally {
+                markShutdownEvidenceFinished()
             }
-            recordBestEffort(audit(ConsoleAuditKind.SERVER_STOPPED, outcome = "stop_initiated"))
             Unit
+        }
+        val afterBarrierInvoked = {
+            runWhenCommissioningTransitionsAreIdle(finishShutdownEvidence)
         }
         if (stopNeutral == null) {
             afterBarrierInvoked()
-            shutdownNeutralCompleted.countDown()
         } else if (synchronized(lock) { neutralCompletedToken == stopNeutral?.token }) {
             afterBarrierInvoked()
-            synchronized(lock) {
-                shutdownNeutralSucceeded =
+            markShutdownNeutralFinished(
+                synchronized(lock) {
                     unresolvedNeutralContext?.matches(checkNotNull(stopNeutral)) != true
-            }
-            shutdownNeutralCompleted.countDown()
+                },
+            )
         } else {
             executeNeutral(checkNotNull(stopNeutral), afterBarrierInvoked)
         }
@@ -1366,7 +1748,7 @@ class ConsoleServerCore(
             }
         }
         if (!reserved) return false
-        deadlineTask?.cancel()
+        cancelBestEffort(deadlineTask)
         val finalize = {
             finalizeCommandRecord(
                 record,
@@ -1414,37 +1796,6 @@ class ConsoleServerCore(
                     "required completion evidence unavailable",
                 )
             }
-        var evidenceNeutral: NeutralPlan? = null
-        var evidenceRevokedLease: ActiveLease? = null
-        if (!evidenceRecorded) {
-            synchronized(actuationDispatchLock) {
-                synchronized(lock) {
-                    neutralFault = "discrete action completion evidence unavailable"
-                    val lease = record.actionLease
-                    if (lease != null) {
-                        if (activeLease === lease) {
-                            activeLease = null
-                            evidenceRevokedLease = lease
-                        }
-                        if (neutralBarrierToken == record.barrierToken &&
-                            neutralCompletedToken == record.barrierToken
-                        ) {
-                            neutralBarrierToken = null
-                            activeNeutralPlan = null
-                            neutralInvocationToken = null
-                            neutralCompletedToken = null
-                        }
-                        evidenceNeutral =
-                            prepareNeutralLocked(
-                                lease,
-                                ConsoleSafetyTrigger.CONTROL_TTL_EXPIRED,
-                                forceBarrier = true,
-                            )
-                        record.barrierToken = evidenceNeutral?.token
-                    }
-                }
-            }
-        }
         val shouldEmit = synchronized(lock) {
             if (commands[record.command.commandId] !== record || record.state != CommandRecordState.COMPLETING) {
                 false
@@ -1459,7 +1810,7 @@ class ConsoleServerCore(
                 }
                 val neutralStillCompleting =
                     latchUnknownActuation && neutralCompletedToken != record.barrierToken
-                if (!preserveNeutralBarrier && evidenceNeutral == null && !neutralStillCompleting &&
+                if (!preserveNeutralBarrier && !neutralStillCompleting &&
                     neutralBarrierToken == record.barrierToken
                 ) {
                     neutralBarrierToken = null
@@ -1470,11 +1821,7 @@ class ConsoleServerCore(
                 !closed
             }
         }
-        val afterBarrierInvoked = {
-            evidenceRevokedLease?.let(::cancelLeaseTasks)
-            if (shouldEmit) emit(record.sessionId, ConsoleCoreEvent.CommandCompleted(publishedResult))
-        }
-        evidenceNeutral?.let { executeNeutral(it, afterBarrierInvoked) } ?: afterBarrierInvoked()
+        if (shouldEmit) emit(record.sessionId, ConsoleCoreEvent.CommandCompleted(publishedResult))
         return true
     }
 
@@ -1522,18 +1869,17 @@ class ConsoleServerCore(
         if (neutral != null) {
             var finalized = executionAck
             executeNeutral(checkNotNull(neutral)) {
-                finalized = finalizeControlEvidence(control, execution, executionAck, neutralAlreadyInvoked = true)
+                finalized = finalizeControlEvidence(control, execution, executionAck)
             }
             return finalized
         }
-        return finalizeControlEvidence(control, execution, executionAck, neutralAlreadyInvoked = false)
+        return finalizeControlEvidence(control, execution, executionAck)
     }
 
     private fun finalizeControlEvidence(
         control: CommittedControl,
         execution: ConsoleExecutionResult,
         executionAck: ConsoleControlAck,
-        neutralAlreadyInvoked: Boolean,
     ): ConsoleControlAck {
         val evidenceRecorded =
             recordBestEffort(
@@ -1549,25 +1895,6 @@ class ConsoleServerCore(
                     authorityDecisionId = control.admitted.authorityDecisionId,
                 ),
             )
-        var revokedLease: ActiveLease? = null
-        var auditNeutral: NeutralPlan? = null
-        if (!evidenceRecorded) {
-            auditNeutral = synchronized(actuationDispatchLock) {
-                synchronized(lock) {
-                    if (activeLease === control.lease) {
-                        activeLease = null
-                        revokedLease = control.lease
-                        prepareNeutralLocked(
-                            control.lease,
-                            ConsoleSafetyTrigger.CONTROL_TTL_EXPIRED,
-                            forceBarrier = activeNeutralPlan == null,
-                        )
-                    } else {
-                        activeNeutralPlan
-                    }
-                }
-            }
-        }
         val ack =
             if (evidenceRecorded) {
                 executionAck
@@ -1579,34 +1906,117 @@ class ConsoleServerCore(
                     "audit_unavailable",
                 )
             }
-        val emitAck = {
-            revokedLease?.let(::cancelLeaseTasks)
-            revokedLease?.let { lease ->
-                if (synchronized(lock) { !closed }) {
-                    emit(
-                        lease.holderSessionId,
-                        ConsoleCoreEvent.LeaseChanged(
-                            ConsoleLeaseState(
-                                ConsoleLeaseStatus.RELEASED,
-                                lease.leaseId,
-                                null,
-                                null,
-                                null,
-                            ),
-                        ),
-                    )
-                }
-            }
-            if (synchronized(lock) { !closed }) {
-                emit(control.admitted.sessionId, ConsoleCoreEvent.ControlAcknowledged(ack))
-            }
-        }
-        if (auditNeutral != null && !neutralAlreadyInvoked) {
-            executeNeutral(checkNotNull(auditNeutral), emitAck)
-        } else {
-            emitAck()
+        if (synchronized(lock) { !closed }) {
+            emit(control.admitted.sessionId, ConsoleCoreEvent.ControlAcknowledged(ack))
         }
         return ack
+    }
+
+    /** Caller holds [lock]. Shared observation fields cannot drift from browser runtime truth. */
+    private fun currentActuationObservationLocked() =
+        ConsoleActuationObservation(
+            adapter = actuationReadiness.adapter,
+            aircraftConnection = actuationReadiness.aircraftConnection,
+            adapterActuationReady = hardwareAdapterActuationReady,
+            operatingProfile = actuationReadiness.operatingProfile,
+        )
+
+    /** Caller holds [lock]. Browser-visible DJI lock truth never becomes authority by itself. */
+    private fun newLeaseAuthorityLocked(sessionId: String): LeaseAuthority? {
+        if (commissioningTransitionTokens.isNotEmpty()) return null
+        if (actuationReadiness.allowsLease(sessionId)) return LeaseAuthority.Mock
+        if (commissioningActivationPending) return null
+        val commissioning = commissioningLifecycle.currentSession() ?: return null
+        return if (
+            commissioningLifecycle.allowsLease(
+                currentActuationObservationLocked(),
+                commissioning,
+                sessionId,
+                monotonicClock.nowNanos(),
+            )
+        ) {
+            LeaseAuthority.Commissioning(commissioning)
+        } else {
+            null
+        }
+    }
+
+    /** Caller holds [lock]. An old lease can never float onto a replacement generation. */
+    private fun leaseAuthorityAllowsLocked(
+        lease: ActiveLease,
+        intent: ConsoleActuationIntent? = null,
+    ): Boolean {
+        if (commissioningTransitionTokens.isNotEmpty()) return false
+        if (lease.deadlineAttachPending) return false
+        val commissioning = lease.commissioningSession
+        if (commissioning == null) {
+            return if (intent == null) {
+                actuationReadiness.allowsLease(lease.holderSessionId)
+            } else {
+                actuationReadiness.allows(lease.holderSessionId, intent)
+            }
+        }
+        if (commissioningActivationPending) return false
+        return if (intent == null) {
+            commissioningLifecycle.allowsLease(
+                currentActuationObservationLocked(),
+                commissioning,
+                lease.holderSessionId,
+                monotonicClock.nowNanos(),
+            )
+        } else {
+            commissioningLifecycle.authorizes(
+                currentActuationObservationLocked(),
+                commissioning,
+                lease.holderSessionId,
+                intent,
+                monotonicClock.nowNanos(),
+            )
+        }
+    }
+
+    private fun commandAuthorityAllowsLocked(
+        record: CommandRecord,
+        intent: ConsoleActuationIntent,
+    ): Boolean {
+        if (commissioningTransitionTokens.isNotEmpty()) return false
+        if (record.actionLease?.deadlineAttachPending == true) return false
+        val commissioning = record.commissioningSession
+        return if (commissioning == null) {
+            record.readinessEpoch == readinessEpoch &&
+                actuationReadiness.allows(record.sessionId, intent)
+        } else {
+            !commissioningActivationPending &&
+                commissioningLifecycle.authorizes(
+                    currentActuationObservationLocked(),
+                    commissioning,
+                    record.sessionId,
+                    intent,
+                    monotonicClock.nowNanos(),
+                )
+        }
+    }
+
+    private fun controlAuthorityAllowsLocked(control: CommittedControl): Boolean {
+        if (commissioningTransitionTokens.isNotEmpty()) return false
+        if (control.lease.deadlineAttachPending) return false
+        val commissioning = control.commissioningSession
+        return if (commissioning == null) {
+            control.readinessEpoch == readinessEpoch &&
+                actuationReadiness.allows(
+                    control.admitted.sessionId,
+                    ConsoleActuationIntent.VIRTUAL_STICK,
+                )
+        } else {
+            !commissioningActivationPending &&
+                commissioningLifecycle.authorizes(
+                    currentActuationObservationLocked(),
+                    commissioning,
+                    control.admitted.sessionId,
+                    ConsoleActuationIntent.VIRTUAL_STICK,
+                    monotonicClock.nowNanos(),
+                )
+        }
     }
 
     private fun commandRuleLocked(
@@ -1624,12 +2034,12 @@ class ConsoleServerCore(
                 CompanionAdmissionRule.reject("invalid_command_ttl")
             auditFault -> CompanionAdmissionRule.reject("audit_unavailable")
             neutralFault != null -> CompanionAdmissionRule.reject("actuation_locked", neutralFault)
-            !actuationReadiness.allows(sessionId, action.actuationIntent) ->
-                CompanionAdmissionRule.reject("actuation_not_ready")
             activeDiscreteCommandId != null -> CompanionAdmissionRule.reject("discrete_action_in_progress")
             neutralBarrierToken != null -> CompanionAdmissionRule.reject("neutral_in_progress")
             activeLease?.leaseId != leaseId || activeLease?.holderSessionId != sessionId ->
                 CompanionAdmissionRule.reject("not_lease_holder")
+            !leaseAuthorityAllowsLocked(checkNotNull(activeLease), action.actuationIntent) ->
+                CompanionAdmissionRule.reject("actuation_not_ready")
             else -> CompanionAdmissionRule.ACCEPTED
         }
 
@@ -1651,12 +2061,12 @@ class ConsoleServerCore(
             !frame.axesAreNormalized() -> CompanionAdmissionRule.reject("invalid_control_axes")
             auditFault -> CompanionAdmissionRule.reject("audit_unavailable")
             neutralFault != null -> CompanionAdmissionRule.reject("actuation_locked", neutralFault)
-            !actuationReadiness.allows(sessionId, ConsoleActuationIntent.VIRTUAL_STICK) ->
-                CompanionAdmissionRule.reject("actuation_not_ready")
             activeDiscreteCommandId != null -> CompanionAdmissionRule.reject("discrete_action_in_progress")
             neutralBarrierToken != null -> CompanionAdmissionRule.reject("neutral_in_progress")
             lease == null || lease.leaseId != frame.leaseId || lease.holderSessionId != sessionId ->
                 CompanionAdmissionRule.reject("not_lease_holder")
+            !leaseAuthorityAllowsLocked(lease, ConsoleActuationIntent.VIRTUAL_STICK) ->
+                CompanionAdmissionRule.reject("actuation_not_ready")
             lease.lastInputSequence != null && frame.inputSequence <= checkNotNull(lease.lastInputSequence) ->
                 CompanionAdmissionRule.reject("stale_sequence")
             !ignorePending && lease.pendingControlSequence != null ->
@@ -1741,25 +2151,475 @@ class ConsoleServerCore(
         return ack
     }
 
-    private fun scheduleCommandDeadline(record: CommandRecord): Boolean {
-        val task =
-            try {
-                scheduler.scheduleAt(record.deadlineNanos) {
-                    onCommandDeadline(record.command.commandId, record.intentDigestSha256, record.deadlineNanos)
-                }
-            } catch (_: Exception) {
-                return false
+    private fun refusedCommissioningStart(
+        decision: ConsoleCommissioningStartDecision,
+    ) = ConsoleCommissioningStartResult(decision, null)
+
+    /** Caller holds [lock]. DJI commissioning never rewrites the browser-visible lock to unlocked. */
+    private fun commissioningPublicLockIsSafeLocked(): Boolean =
+        actuationReadiness.adapter == AdapterKind.DJI &&
+            actuationReadiness.actuationLock == ActuationLockState.LOCKED
+
+    private fun commissioningAuditDetail(reservation: ConsoleCommissioningReservation): String =
+        "generation=${reservation.generation};ttl_ms=${reservation.requestedTtlMillis};" +
+            "intents=${reservation.allowedIntents.sortedBy { it.name }.joinToString(",") { it.name.lowercase() }}"
+
+    private fun commissioningAuditDetail(session: ConsoleCommissioningSessionView): String =
+        "generation=${session.generation};expires_at_nanos=${session.expiresAtMonotonicNanos};" +
+            "intents=${session.allowedIntents.sortedBy { it.name }.joinToString(",") { it.name.lowercase() }}"
+
+    private fun ConsoleCommissioningSessionView.sameCommissioningGeneration(
+        other: ConsoleCommissioningSessionView,
+    ): Boolean =
+        commissioningId == other.commissioningId && generation == other.generation
+
+    private fun prepareCommissioningTermination(
+        expectedSession: ConsoleCommissioningSessionView?,
+        reason: ConsoleCommissioningTerminationReason,
+    ): PreparedCommissioningTermination =
+        synchronized(actuationDispatchLock) {
+            synchronized(lock) {
+                prepareCommissioningTerminationLocked(expectedSession, reason)
             }
-        val keep = synchronized(lock) {
-            if (commands[record.command.commandId] === record && record.state == CommandRecordState.EXECUTING) {
-                record.deadlineTask = task
+        }
+
+    /** Caller holds actuationDispatchLock then [lock]. Authority is revoked before this returns. */
+    private fun prepareCommissioningTerminationLocked(
+        expectedSession: ConsoleCommissioningSessionView?,
+        reason: ConsoleCommissioningTerminationReason,
+    ): PreparedCommissioningTermination {
+        val current = commissioningLifecycle.currentSession()
+            ?: return PreparedCommissioningTermination(null, stale = false)
+        if (expectedSession != null && !current.sameCommissioningGeneration(expectedSession)) {
+            return PreparedCommissioningTermination(null, stale = true)
+        }
+        if (commissioningLifecycle.revoke(current) != ConsoleCommissioningRevokeDecision.REVOKED) {
+            return PreparedCommissioningTermination(null, stale = expectedSession != null)
+        }
+
+        // This is the terminal linearization point. Every later gate sees no active generation.
+        val evidenceTransitionToken = beginCommissioningTransitionLocked()
+        commissioningActivationPending = false
+        commissioningScheduleEpoch = nextCounter(commissioningScheduleEpoch, "commissioning schedule epoch")
+        val deadlineTask = commissioningDeadlineTask
+        commissioningDeadlineTask = null
+        pendingLease = null
+
+        val actionRecord =
+            activeDiscreteCommandId?.let(commands::get)
+                ?.takeIf {
+                    it.commissioningSession?.sameCommissioningGeneration(current) == true &&
+                        (it.state == CommandRecordState.EXECUTING ||
+                            it.state == CommandRecordState.COMPLETING)
+                }
+        val commandTermination =
+            actionRecord?.takeIf {
+                it.state == CommandRecordState.EXECUTING && it.executionInvoked
+            }?.let {
+                terminateInvokedActionLocked(
+                    it,
+                    ConsoleSafetyTrigger.ACTUATION_READINESS_LOST,
+                    "commissioning_${reason.name.lowercase()}",
+                )
+            }
+        val cancelledCommand =
+            actionRecord?.takeIf {
+                it.state == CommandRecordState.EXECUTING && !it.executionInvoked
+            }?.let { record ->
+                record.state = CommandRecordState.COMPLETING
+                val task = record.deadlineTask
+                record.deadlineTask = null
+                CancelledCommissioningCommand(
+                    record = record,
+                    result =
+                        ConsoleCommandResult(
+                            record.command.commandId,
+                            ConsoleCommandOutcome.FAILED,
+                            "commissioning_${reason.name.lowercase()}",
+                            "commissioning authority ended before executor dispatch",
+                        ),
+                    deadlineTask = task,
+                )
+            }
+        val revokedLease =
+            commandTermination?.revokedLease
+                ?: activeLease?.takeIf {
+                    it.commissioningSession?.sameCommissioningGeneration(current) == true
+                }?.also { activeLease = null }
+        val actionLease = revokedLease ?: actionRecord?.actionLease
+        if (commandTermination == null && actionLease != null) clearCompletedNeutralBarrierLocked()
+        val neutral =
+            commandTermination?.neutral
+                ?: actionLease?.let {
+                    prepareFreshNeutralLocked(
+                        it,
+                        ConsoleSafetyTrigger.ACTUATION_READINESS_LOST,
+                    )
+                }
+        val neutralTransitionToken = neutral?.let { beginCommissioningTransitionLocked() }
+        val terminalNeutral = neutral?.let { plan ->
+            plan.copy(
+                completion = { result ->
+                    try {
+                        plan.completion?.invoke(result)
+                    } finally {
+                        completeCommissioningTransition(checkNotNull(neutralTransitionToken))
+                    }
+                },
+            ).also { wrapped ->
+                if (activeNeutralPlan?.token == plan.token) activeNeutralPlan = wrapped
+            }
+        }
+        return PreparedCommissioningTermination(
+            CommissioningTermination(
+                session = current,
+                reason = reason,
+                revokedLease = revokedLease,
+                affectedLease = actionLease,
+                neutral = terminalNeutral,
+                commandTermination = commandTermination,
+                cancelledCommand = cancelledCommand,
+                deadlineTask = deadlineTask,
+                evidenceTransitionToken = evidenceTransitionToken,
+                neutralTransitionToken = neutralTransitionToken,
+            ),
+            stale = false,
+        )
+    }
+
+    private fun terminateCommissioning(
+        expectedSession: ConsoleCommissioningSessionView? = null,
+        reason: ConsoleCommissioningTerminationReason,
+        recordTerminalAudit: Boolean = true,
+    ): Boolean {
+        val prepared = prepareCommissioningTermination(expectedSession, reason)
+        return prepared.transition?.let {
+            finishCommissioningTermination(it, recordTerminalAudit)
+        } ?: false
+    }
+
+    /** Safety invocation precedes the potentially blocking required terminal audit. */
+    private fun finishCommissioningTermination(
+        transition: CommissioningTermination,
+        recordTerminalAudit: Boolean = true,
+    ): Boolean {
+        var auditRecorded = true
+        val afterBarrierInvoked: () -> Unit = {
+            try {
+                cancelBestEffort(transition.deadlineTask)
+                cancelBestEffort(transition.commandTermination?.deadlineTask)
+                transition.commandTermination?.actionLease?.let(::cancelLeaseTasks)
+                cancelBestEffort(transition.cancelledCommand?.deadlineTask)
+                transition.cancelledCommand?.record?.actionLease?.let(::cancelLeaseTasks)
+                transition.revokedLease?.let(::cancelLeaseTasks)
+                transition.cancelledCommand?.let { cancelled ->
+                    finalizeCommandRecord(
+                        cancelled.record,
+                        cancelled.result,
+                        latchUnknownActuation = false,
+                        preserveNeutralBarrier = true,
+                    )
+                }
+                if (recordTerminalAudit) {
+                    auditRecorded = recordRequired(
+                        audit(
+                            ConsoleAuditKind.COMMISSIONING_TERMINATED,
+                            sessionId = transition.session.operatorSessionId,
+                            leaseId = transition.affectedLease?.leaseId,
+                            subjectId = transition.session.commissioningId,
+                            outcome = "terminated",
+                            reason = transition.reason.name.lowercase(),
+                            detail = commissioningAuditDetail(transition.session),
+                        ),
+                    )
+                }
+                transition.revokedLease?.let { lease ->
+                    recordBestEffort(
+                        audit(
+                            ConsoleAuditKind.LEASE_RELEASED,
+                            lease.holderSessionId,
+                            lease.leaseId,
+                            outcome = "commissioning_terminated",
+                            reason = transition.reason.name.lowercase(),
+                        ),
+                    )
+                    if (synchronized(lock) { !closed }) {
+                        emit(
+                            lease.holderSessionId,
+                            ConsoleCoreEvent.LeaseChanged(
+                                ConsoleLeaseState(
+                                    ConsoleLeaseStatus.RELEASED,
+                                    lease.leaseId,
+                                    null,
+                                    null,
+                                    transition.reason.name.lowercase(),
+                                ),
+                            ),
+                        )
+                    }
+                }
+            } finally {
+                completeCommissioningTransition(transition.evidenceTransitionToken)
+            }
+        }
+        transition.neutral?.let { executeNeutral(it, afterBarrierInvoked) } ?: afterBarrierInvoked()
+        return auditRecorded
+    }
+
+    /** Caller holds [lock]. */
+    private fun beginCommissioningTransitionLocked(): Long {
+        commissioningAuthorityEpoch =
+            nextCounter(commissioningAuthorityEpoch, "commissioning authority epoch")
+        check(commissioningTransitionTokens.add(commissioningAuthorityEpoch)) {
+            "commissioning transition token collision"
+        }
+        return commissioningAuthorityEpoch
+    }
+
+    private fun completeCommissioningTransition(transitionToken: Long) {
+        val drainAuditFault = synchronized(lock) {
+            commissioningTransitionTokens.remove(transitionToken)
+            if (commissioningTransitionTokens.isEmpty() && auditFault && auditTerminalizationDeferred) {
+                auditTerminalizationDeferred = false
                 true
             } else {
                 false
             }
         }
-        if (!keep) task.cancel()
-        return keep
+        if (drainAuditFault) terminalizeAuthorityAfterAuditFault()
+        drainShutdownEvidenceIfTransitionsAreIdle()
+    }
+
+    private fun runWhenCommissioningTransitionsAreIdle(work: () -> Unit) {
+        val runNow = synchronized(lock) {
+            if (commissioningTransitionTokens.isEmpty()) {
+                true
+            } else {
+                check(pendingShutdownEvidenceWork == null) {
+                    "shutdown evidence work is already pending"
+                }
+                pendingShutdownEvidenceWork = work
+                false
+            }
+        }
+        if (runNow) work()
+    }
+
+    private fun drainShutdownEvidenceIfTransitionsAreIdle() {
+        val work = synchronized(lock) {
+            if (commissioningTransitionTokens.isEmpty()) {
+                pendingShutdownEvidenceWork.also { pendingShutdownEvidenceWork = null }
+            } else {
+                null
+            }
+        }
+        work?.invoke()
+    }
+
+    private fun markShutdownEvidenceFinished() {
+        val signal = synchronized(lock) {
+            shutdownEvidenceFinished = true
+            shutdownNeutralFinished
+        }
+        if (signal) shutdownNeutralCompleted.countDown()
+    }
+
+    private fun markShutdownNeutralFinished(succeeded: Boolean) {
+        val signal = synchronized(lock) {
+            shutdownNeutralSucceeded = succeeded
+            shutdownNeutralFinished = true
+            shutdownEvidenceFinished
+        }
+        if (signal) shutdownNeutralCompleted.countDown()
+    }
+
+    private fun scheduleCommissioningDeadline(
+        session: ConsoleCommissioningSessionView,
+    ): CommissioningDeadlineAttachDecision {
+        val registration = synchronized(lock) {
+            val current = commissioningLifecycle.currentSession()
+            if (closed || actuationAdmissionClosed.get() || auditFault ||
+                current?.sameCommissioningGeneration(session) != true
+            ) {
+                null
+            } else {
+                commissioningScheduleEpoch =
+                    nextCounter(commissioningScheduleEpoch, "commissioning schedule epoch")
+                commissioningScheduleEpoch
+            }
+        } ?: return CommissioningDeadlineAttachDecision.STATE_CHANGED_OR_REVOKED
+
+        var synchronousReplacementCount = 0
+        while (true) {
+            val callbackState = AtomicInteger(DEADLINE_CALLBACK_SCHEDULING)
+            val candidate =
+                try {
+                    scheduler.scheduleAt(session.expiresAtMonotonicNanos) {
+                        if (callbackState.compareAndSet(
+                                DEADLINE_CALLBACK_SCHEDULING,
+                                DEADLINE_CALLBACK_EARLY,
+                            )
+                        ) {
+                            return@scheduleAt
+                        }
+                        if (callbackState.get() == DEADLINE_CALLBACK_ATTACHED) {
+                            onCommissioningDeadline(session, registration)
+                        }
+                    }
+                } catch (_: Exception) {
+                    return CommissioningDeadlineAttachDecision.SCHEDULER_UNAVAILABLE
+                }
+            val attached = synchronized(lock) {
+                val expiry = commissioningLifecycle.expiryDecision(session, monotonicClock.nowNanos())
+                val current = commissioningLifecycle.currentSession()
+                val canActivate =
+                    !closed && !actuationAdmissionClosed.get() && !auditFault &&
+                        commissioningTransitionTokens.isEmpty() &&
+                        commissioningScheduleEpoch == registration &&
+                        current?.sameCommissioningGeneration(session) == true &&
+                        session.operatorSessionId in sessions && commissioningPublicLockIsSafeLocked() &&
+                        currentActuationObservationLocked().isEligibleForG520Commissioning() &&
+                        expiry == ConsoleCommissioningExpiryDecision.NOT_DUE
+                if (canActivate && callbackState.compareAndSet(
+                        DEADLINE_CALLBACK_SCHEDULING,
+                        DEADLINE_CALLBACK_ATTACHED,
+                    )
+                ) {
+                    commissioningDeadlineTask = candidate
+                    commissioningActivationPending = false
+                    true
+                } else {
+                    // Prevent a callback racing cancellation from creating another replacement.
+                    callbackState.compareAndSet(
+                        DEADLINE_CALLBACK_SCHEDULING,
+                        DEADLINE_CALLBACK_EARLY,
+                    )
+                    false
+                }
+            }
+            if (attached) return CommissioningDeadlineAttachDecision.ATTACHED
+
+            cancelBestEffort(candidate)
+            val unattachedDecision = synchronized(lock) {
+                if (commissioningScheduleEpoch != registration ||
+                    commissioningLifecycle.currentSession()
+                        ?.sameCommissioningGeneration(session) != true
+                ) {
+                    CommissioningDeadlineAttachDecision.STATE_CHANGED_OR_REVOKED
+                } else if (
+                    commissioningLifecycle.expiryDecision(session, monotonicClock.nowNanos()) ==
+                    ConsoleCommissioningExpiryDecision.DUE
+                ) {
+                    CommissioningDeadlineAttachDecision.EXPIRED_CURRENT
+                } else {
+                    null
+                }
+            }
+            if (unattachedDecision != null) return unattachedDecision
+            if (callbackState.get() != DEADLINE_CALLBACK_EARLY) {
+                return CommissioningDeadlineAttachDecision.STATE_CHANGED_OR_REVOKED
+            }
+            if (synchronousReplacementCount >= MAX_SYNCHRONOUS_DEADLINE_REPLACEMENTS) {
+                return CommissioningDeadlineAttachDecision.SCHEDULER_UNAVAILABLE
+            }
+            synchronousReplacementCount += 1
+        }
+    }
+
+    private fun onCommissioningDeadline(
+        expectedSession: ConsoleCommissioningSessionView,
+        registration: Long,
+    ) {
+        val action = synchronized(actuationDispatchLock) {
+            synchronized(lock) {
+                if (commissioningScheduleEpoch != registration ||
+                    commissioningLifecycle.currentSession()
+                        ?.sameCommissioningGeneration(expectedSession) != true
+                ) {
+                    CommissioningDeadlineAction.STALE
+                } else {
+                    commissioningDeadlineTask = null
+                    when (commissioningLifecycle.expiryDecision(expectedSession, monotonicClock.nowNanos())) {
+                        ConsoleCommissioningExpiryDecision.DUE ->
+                            CommissioningDeadlineAction.Terminate(
+                                prepareCommissioningTerminationLocked(
+                                    expectedSession,
+                                    ConsoleCommissioningTerminationReason.TTL_EXPIRED,
+                                ).transition,
+                            )
+                        ConsoleCommissioningExpiryDecision.NOT_DUE -> {
+                            // No authority is effective while an early task is being replaced.
+                            commissioningActivationPending = true
+                            CommissioningDeadlineAction.RESCHEDULE
+                        }
+                        ConsoleCommissioningExpiryDecision.NO_ACTIVE_SESSION,
+                        ConsoleCommissioningExpiryDecision.STALE_SESSION,
+                        -> CommissioningDeadlineAction.STALE
+                    }
+                }
+            }
+        }
+        when (action) {
+            is CommissioningDeadlineAction.Terminate ->
+                action.transition?.let(::finishCommissioningTermination)
+            CommissioningDeadlineAction.RESCHEDULE ->
+                when (scheduleCommissioningDeadline(expectedSession)) {
+                    CommissioningDeadlineAttachDecision.ATTACHED -> Unit
+                    CommissioningDeadlineAttachDecision.SCHEDULER_UNAVAILABLE ->
+                        terminateCommissioning(
+                            expectedSession,
+                            ConsoleCommissioningTerminationReason.DEADLINE_UNAVAILABLE,
+                        )
+                    CommissioningDeadlineAttachDecision.EXPIRED_CURRENT ->
+                        terminateCommissioning(
+                            expectedSession,
+                            ConsoleCommissioningTerminationReason.TTL_EXPIRED,
+                        )
+                    CommissioningDeadlineAttachDecision.STATE_CHANGED_OR_REVOKED -> Unit
+                }
+            CommissioningDeadlineAction.STALE -> Unit
+        }
+    }
+
+    private fun scheduleCommandDeadline(record: CommandRecord): Boolean {
+        return scheduleDeadlineWithoutInlineRecursion(
+            deadlineNanos = record.deadlineNanos,
+            isCurrent = {
+                synchronized(lock) {
+                    commands[record.command.commandId] === record &&
+                        record.state == CommandRecordState.EXECUTING &&
+                        monotonicClock.nowNanos() < record.deadlineNanos
+                }
+            },
+            attach = { task, callbackState ->
+                synchronized(lock) {
+                    if (commands[record.command.commandId] === record &&
+                        record.state == CommandRecordState.EXECUTING &&
+                        monotonicClock.nowNanos() < record.deadlineNanos &&
+                        callbackState.compareAndSet(
+                            DEADLINE_CALLBACK_SCHEDULING,
+                            DEADLINE_CALLBACK_ATTACHED,
+                        )
+                    ) {
+                        record.deadlineTask = task
+                        true
+                    } else {
+                        callbackState.compareAndSet(
+                            DEADLINE_CALLBACK_SCHEDULING,
+                            DEADLINE_CALLBACK_EARLY,
+                        )
+                        false
+                    }
+                }
+            },
+            onDeadline = {
+                onCommandDeadline(
+                    record.command.commandId,
+                    record.intentDigestSha256,
+                    record.deadlineNanos,
+                )
+            },
+        )
     }
 
     private fun onCommandDeadline(
@@ -1776,10 +2636,11 @@ class ConsoleServerCore(
         } ?: return
         if (monotonicClock.nowNanos() < deadlineNanos) {
             if (!scheduleCommandDeadline(record)) {
+                val expired = monotonicClock.nowNanos() >= deadlineNanos
                 terminateCommandForDeadline(
                     record,
-                    "command_deadline_unavailable",
-                    timedOut = false,
+                    if (expired) "command_ttl_expired" else "command_deadline_unavailable",
+                    timedOut = expired,
                     latchUnknownActuation = true,
                 )
             }
@@ -1866,7 +2727,7 @@ class ConsoleServerCore(
         }
 
         val finishAfterBarrier = {
-            deadlineTask?.cancel()
+            cancelBestEffort(deadlineTask)
             cancelLeaseTasks(actionLease)
             if (revokedLease) {
                 recordBestEffort(
@@ -2016,23 +2877,51 @@ class ConsoleServerCore(
 
     private fun scheduleLeaseDeadline(lease: ActiveLease): Boolean {
         val epoch = lease.leaseEpoch
-        val task =
-            try {
-                scheduler.scheduleAt(lease.deadlineNanos) { onLeaseDeadline(lease.leaseId, epoch) }
-            } catch (_: Exception) {
-                failLeaseDeadline(lease, "lease_deadline_unavailable")
-                return false
-            }
-        val keep = synchronized(lock) {
-            if (activeLease === lease && lease.leaseEpoch == epoch && !closed) {
-                lease.leaseTask = task
-                true
-            } else {
-                false
-            }
+        val scheduled =
+            scheduleDeadlineWithoutInlineRecursion(
+                deadlineNanos = lease.deadlineNanos,
+                isCurrent = {
+                    synchronized(lock) {
+                        activeLease === lease && lease.leaseEpoch == epoch &&
+                            lease.deadlineAttachPending && !closed &&
+                            monotonicClock.nowNanos() < lease.deadlineNanos
+                    }
+                },
+                attach = { task, callbackState ->
+                    synchronized(lock) {
+                        if (activeLease === lease && lease.leaseEpoch == epoch &&
+                            lease.deadlineAttachPending && !closed &&
+                            monotonicClock.nowNanos() < lease.deadlineNanos &&
+                            callbackState.compareAndSet(
+                                DEADLINE_CALLBACK_SCHEDULING,
+                                DEADLINE_CALLBACK_ATTACHED,
+                            )
+                        ) {
+                            lease.leaseTask = task
+                            lease.deadlineAttachPending = false
+                            true
+                        } else {
+                            callbackState.compareAndSet(
+                                DEADLINE_CALLBACK_SCHEDULING,
+                                DEADLINE_CALLBACK_EARLY,
+                            )
+                            false
+                        }
+                    }
+                },
+                onDeadline = { onLeaseDeadline(lease.leaseId, epoch) },
+            )
+        if (!scheduled) {
+            failLeaseDeadline(
+                lease,
+                if (monotonicClock.nowNanos() >= lease.deadlineNanos) {
+                    "lease_ttl_expired"
+                } else {
+                    "lease_deadline_unavailable"
+                },
+            )
         }
-        if (!keep) task.cancel()
-        return keep
+        return scheduled
     }
 
     private fun scheduleControlDeadline(
@@ -2041,28 +2930,82 @@ class ConsoleServerCore(
         deadlineNanos: Long,
         reportFailureAck: Boolean = false,
     ): Boolean {
-        val task =
-            try {
-                scheduler.scheduleAt(deadlineNanos) {
-                    onControlDeadline(lease.leaseId, inputVersion, deadlineNanos)
+        val scheduled =
+            scheduleDeadlineWithoutInlineRecursion(
+                deadlineNanos = deadlineNanos,
+                isCurrent = {
+                    synchronized(lock) {
+                        activeLease === lease && lease.inputVersion == inputVersion &&
+                            lease.neutralizedControlEpoch != lease.controlEpoch &&
+                            lease.controlDeadlineNanos == deadlineNanos && !closed &&
+                            monotonicClock.nowNanos() < deadlineNanos
+                    }
+                },
+                attach = { task, callbackState ->
+                    synchronized(lock) {
+                        if (activeLease === lease && lease.inputVersion == inputVersion &&
+                            lease.neutralizedControlEpoch != lease.controlEpoch &&
+                            lease.controlDeadlineNanos == deadlineNanos && !closed &&
+                            monotonicClock.nowNanos() < deadlineNanos &&
+                            callbackState.compareAndSet(
+                                DEADLINE_CALLBACK_SCHEDULING,
+                                DEADLINE_CALLBACK_ATTACHED,
+                            )
+                        ) {
+                            lease.controlTask = task
+                            true
+                        } else {
+                            callbackState.compareAndSet(
+                                DEADLINE_CALLBACK_SCHEDULING,
+                                DEADLINE_CALLBACK_EARLY,
+                            )
+                            false
+                        }
+                    }
+                },
+                onDeadline = { onControlDeadline(lease.leaseId, inputVersion, deadlineNanos) },
+            )
+        if (!scheduled) failControlDeadline(lease, inputVersion, reportFailureAck)
+        return scheduled
+    }
+
+    /**
+     * Some scheduler implementations are allowed to invoke a task before [scheduleAt] returns.
+     * Convert that inline callback into one bounded replacement attempt instead of recursively
+     * calling another scheduler operation on the same stack. A second inline callback fails
+     * closed and lets the owning lease/command/control path neutralize its authority.
+     */
+    private fun scheduleDeadlineWithoutInlineRecursion(
+        deadlineNanos: Long,
+        isCurrent: () -> Boolean,
+        attach: (ConsoleScheduledTask, AtomicInteger) -> Boolean,
+        onDeadline: () -> Unit,
+    ): Boolean {
+        var synchronousReplacementCount = 0
+        while (true) {
+            val callbackState = AtomicInteger(DEADLINE_CALLBACK_SCHEDULING)
+            val candidate =
+                try {
+                    scheduler.scheduleAt(deadlineNanos) {
+                        if (callbackState.compareAndSet(
+                                DEADLINE_CALLBACK_SCHEDULING,
+                                DEADLINE_CALLBACK_EARLY,
+                            )
+                        ) {
+                            return@scheduleAt
+                        }
+                        if (callbackState.get() == DEADLINE_CALLBACK_ATTACHED) onDeadline()
+                    }
+                } catch (_: Exception) {
+                    return false
                 }
-            } catch (_: Exception) {
-                failControlDeadline(lease, inputVersion, reportFailureAck)
-                return false
-            }
-        val keep = synchronized(lock) {
-            if (activeLease === lease && lease.inputVersion == inputVersion &&
-                lease.neutralizedControlEpoch != lease.controlEpoch &&
-                lease.controlDeadlineNanos == deadlineNanos && !closed
-            ) {
-                lease.controlTask = task
-                true
-            } else {
-                false
-            }
+            if (attach(candidate, callbackState)) return true
+
+            cancelBestEffort(candidate)
+            if (callbackState.get() != DEADLINE_CALLBACK_EARLY || !isCurrent()) return false
+            if (synchronousReplacementCount >= MAX_SYNCHRONOUS_DEADLINE_REPLACEMENTS) return false
+            synchronousReplacementCount += 1
         }
-        if (!keep) task.cancel()
-        return keep
     }
 
     private fun failLeaseDeadline(lease: ActiveLease, reason: String) {
@@ -2095,7 +3038,7 @@ class ConsoleServerCore(
                 }
             }
         }
-        commandTermination?.deadlineTask?.cancel()
+        cancelBestEffort(commandTermination?.deadlineTask)
         transition?.let { expireLease(it, reason) }
     }
 
@@ -2142,6 +3085,8 @@ class ConsoleServerCore(
                 if (closed || lease == null || lease.leaseId != leaseId || lease.leaseEpoch != leaseEpoch) {
                     null
                 } else if (now < lease.deadlineNanos) {
+                    lease.leaseTask = null
+                    lease.deadlineAttachPending = true
                     LeaseDeadlineEarly(lease)
                 } else {
                     val invokedRecord =
@@ -2174,7 +3119,7 @@ class ConsoleServerCore(
             is LeaseDeadlineEarly -> scheduleLeaseDeadline(transition.lease)
             is LeaseDeadlineExpired -> expireLease(transition.transition)
             is LeaseDeadlineActionTermination -> {
-                transition.termination.deadlineTask?.cancel()
+                cancelBestEffort(transition.termination.deadlineTask)
                 expireLease(
                     LeaseTransition(
                         transition.termination.actionLease,
@@ -2219,6 +3164,24 @@ class ConsoleServerCore(
 
     /** Synchronous fail-closed check for delayed schedulers before handling any new input. */
     private fun expireDueWork() {
+        val expiredCommissioning = synchronized(actuationDispatchLock) {
+            synchronized(lock) {
+                val current = commissioningLifecycle.currentSession()
+                if (current != null &&
+                    commissioningLifecycle.expiryDecision(current, monotonicClock.nowNanos()) ==
+                    ConsoleCommissioningExpiryDecision.DUE
+                ) {
+                    prepareCommissioningTerminationLocked(
+                        current,
+                        ConsoleCommissioningTerminationReason.TTL_EXPIRED,
+                    ).transition
+                } else {
+                    null
+                }
+            }
+        }
+        expiredCommissioning?.let(::finishCommissioningTermination)
+
         val due = synchronized(actuationDispatchLock) {
             synchronized(lock) state@{
                 val now = monotonicClock.nowNanos()
@@ -2258,7 +3221,7 @@ class ConsoleServerCore(
         when (due) {
             is DueWork.Lease -> expireLease(due.transition)
             is DueWork.CommandLeaseTermination -> {
-                due.termination.deadlineTask?.cancel()
+                cancelBestEffort(due.termination.deadlineTask)
                 expireLease(LeaseTransition(due.termination.actionLease, due.termination.neutral))
             }
             is DueWork.Control -> due.plan?.let(::executeNeutral)
@@ -2297,6 +3260,24 @@ class ConsoleServerCore(
             }
         }
         transition.neutral?.let { executeNeutral(it, afterBarrierInvoked) } ?: afterBarrierInvoked()
+    }
+
+    /** Caller holds dispatch -> state locks. A terminal authority loss needs new neutral work. */
+    private fun prepareFreshNeutralLocked(
+        lease: ActiveLease,
+        trigger: ConsoleSafetyTrigger,
+    ): NeutralPlan {
+        neutralBarrierToken = null
+        activeNeutralPlan = null
+        neutralInvocationToken = null
+        neutralCompletedToken = null
+        return checkNotNull(
+            prepareNeutralLocked(
+                lease,
+                trigger,
+                forceBarrier = true,
+            ),
+        )
     }
 
     private fun prepareNeutralLocked(
@@ -2483,7 +3464,8 @@ class ConsoleServerCore(
                             shutdownNeutralToken = shutdownRetry?.token
                         } else {
                             shutdownNeutralSucceeded = confirmed
-                            signalShutdownCompletion = true
+                            shutdownNeutralFinished = true
+                            signalShutdownCompletion = shutdownEvidenceFinished
                         }
                     }
                     true
@@ -2537,12 +3519,16 @@ class ConsoleServerCore(
                 lease.controlTask = null
             }
         }
-        tasks.forEach(ConsoleScheduledTask::cancel)
+        tasks.forEach(::cancelBestEffort)
+    }
+
+    private fun cancelBestEffort(task: ConsoleScheduledTask?) {
+        runCatching { task?.cancel() }
     }
 
     private fun cancelControlTask(lease: ActiveLease) {
         val task = synchronized(lock) { lease.controlTask.also { lease.controlTask = null } }
-        task?.cancel()
+        cancelBestEffort(task)
     }
 
     private fun replayCommand(sessionId: String, record: CommandRecord): ConsoleCommandAck {
@@ -2614,7 +3600,10 @@ class ConsoleServerCore(
             clientRequestReason = clientRequestReason,
         )
 
-    private fun recordRequired(event: ConsoleAuditEvent): Boolean {
+    private fun recordRequired(
+        event: ConsoleAuditEvent,
+        terminalizeOnFailure: Boolean = true,
+    ): Boolean {
         val recorded =
             try {
                 auditSink.record(event)
@@ -2623,7 +3612,15 @@ class ConsoleServerCore(
                 false
             }
         if (!recorded) {
-            synchronized(lock) { auditFault = true }
+            val firstFailure = synchronized(lock) {
+                if (auditFault) {
+                    false
+                } else {
+                    auditFault = true
+                    true
+                }
+            }
+            if (firstFailure && terminalizeOnFailure) terminalizeAuthorityAfterAuditFault()
             return false
         }
         emit(null, ConsoleCoreEvent.AuditRecorded(event))
@@ -2631,7 +3628,114 @@ class ConsoleServerCore(
     }
 
     /** Safety work proceeds, but a missing evidence record permanently latches actuation closed. */
-    private fun recordBestEffort(event: ConsoleAuditEvent): Boolean = recordRequired(event)
+    private fun recordBestEffort(
+        event: ConsoleAuditEvent,
+        terminalizeOnFailure: Boolean = true,
+    ): Boolean = recordRequired(event, terminalizeOnFailure)
+
+    /**
+     * First required-audit failure is a process-lifetime actuation fault. This transition performs
+     * no required terminal audit, avoiding recursive failure; neutral invocation is still allowed
+     * to make its existing best-effort safety evidence attempts.
+     */
+    private fun terminalizeAuthorityAfterAuditFault() {
+        var commissioning: CommissioningTermination? = null
+        var fallback: AuditFaultTransition? = null
+        synchronized(actuationDispatchLock) {
+            synchronized(lock) {
+                // The in-flight terminal transition already owns its exact neutral plan and any
+                // command completion callback. Re-entering here would replace that plan, lose the
+                // callback, and invoke neutral twice. The audit fault itself is already latched.
+                if (commissioningTransitionTokens.isNotEmpty()) {
+                    auditTerminalizationDeferred = true
+                    return
+                }
+                commissioning =
+                    prepareCommissioningTerminationLocked(
+                        expectedSession = null,
+                        reason = ConsoleCommissioningTerminationReason.AUDIT_UNAVAILABLE,
+                    ).transition
+                if (commissioning == null) {
+                    pendingLease = null
+                    val terminatingRecord =
+                        activeDiscreteCommandId?.let(commands::get)
+                            ?.takeIf { it.state == CommandRecordState.TERMINATING }
+                    val invokedRecord =
+                        activeDiscreteCommandId?.let(commands::get)
+                            ?.takeIf {
+                                it.state == CommandRecordState.EXECUTING && it.executionInvoked
+                            }
+                    val commandTermination =
+                        invokedRecord?.let {
+                            terminateInvokedActionLocked(
+                                it,
+                                ConsoleSafetyTrigger.ACTUATION_READINESS_LOST,
+                                "audit_unavailable",
+                            )
+                        }
+                    val revokedLease =
+                        commandTermination?.revokedLease ?: activeLease?.also { activeLease = null }
+                    val actionLease =
+                        if (terminatingRecord == null) {
+                            revokedLease ?: commandTermination?.actionLease
+                                ?: activeDiscreteCommandId?.let(commands::get)?.actionLease
+                        } else {
+                            null
+                        }
+                    if (commandTermination == null && actionLease != null) {
+                        clearCompletedNeutralBarrierLocked()
+                    }
+                    // A TERMINATING record already owns a fresh neutral plan whose completion
+                    // closes the command. Replacing that plan here would stale its callback and
+                    // strand the record forever. The audit fault still revokes any live lease;
+                    // the owning transition remains responsible for its exact neutral barrier.
+                    val neutral =
+                        commandTermination?.neutral ?: actionLease?.let {
+                            prepareFreshNeutralLocked(
+                                it,
+                                ConsoleSafetyTrigger.ACTUATION_READINESS_LOST,
+                            )
+                        }
+                    fallback =
+                        AuditFaultTransition(
+                            revokedLease = revokedLease,
+                            commandTermination = commandTermination,
+                            neutral = neutral,
+                        )
+                }
+            }
+        }
+
+        commissioning?.let {
+            finishCommissioningTermination(it, recordTerminalAudit = false)
+            return
+        }
+        fallback?.let { transition ->
+            val afterBarrierInvoked: () -> Unit = {
+                cancelBestEffort(transition.commandTermination?.deadlineTask)
+                transition.commandTermination?.actionLease?.let(::cancelLeaseTasks)
+                transition.revokedLease?.let(::cancelLeaseTasks)
+                transition.revokedLease?.let { lease ->
+                    if (synchronized(lock) { !closed }) {
+                        emit(
+                            lease.holderSessionId,
+                            ConsoleCoreEvent.LeaseChanged(
+                                ConsoleLeaseState(
+                                    ConsoleLeaseStatus.RELEASED,
+                                    lease.leaseId,
+                                    null,
+                                    null,
+                                    "audit_unavailable",
+                                ),
+                            ),
+                        )
+                    }
+                }
+            }
+            transition.neutral?.let { executeNeutral(it, afterBarrierInvoked) }
+                ?: afterBarrierInvoked()
+        }
+    }
 
     private fun emit(targetSessionId: String?, event: ConsoleCoreEvent) {
         runCatching { eventSink.emit(targetSessionId, event) }
@@ -2670,6 +3774,7 @@ class ConsoleServerCore(
     private class ActiveLease(
         val leaseId: String,
         val holderSessionId: String,
+        val commissioningSession: ConsoleCommissioningSessionView?,
         var leaseEpoch: Long,
         var deadlineNanos: Long,
         var leaseTask: ConsoleScheduledTask? = null,
@@ -2681,16 +3786,24 @@ class ConsoleServerCore(
         var inputVersion: Long = 0L,
         var neutralizedControlEpoch: Long? = null,
         var mutationPending: Boolean = false,
+        var deadlineAttachPending: Boolean = false,
+    )
+
+    private class PendingLeaseReservation(
+        val session: ConsoleSession,
+        val authority: LeaseAuthority,
     )
 
     private enum class CommandRecordState { AUDITING, EXECUTING, TERMINATING, COMPLETING, COMPLETED }
 
     private class CommandRecord(
         val sessionId: String,
+        val session: ConsoleSession,
         val command: ConsoleDiscreteCommand,
         val intentDigestSha256: String,
         val authorityDecisionId: String,
         val readinessEpoch: Long,
+        val commissioningSession: ConsoleCommissioningSessionView?,
         val deadlineNanos: Long,
         var state: CommandRecordState = CommandRecordState.AUDITING,
         var ack: ConsoleCommandAck =
@@ -2715,6 +3828,11 @@ class ConsoleServerCore(
         data class Refused(val reason: String) : CommandReservation
     }
 
+    private sealed interface LeaseAuthority {
+        data object Mock : LeaseAuthority
+        class Commissioning(val session: ConsoleCommissioningSessionView) : LeaseAuthority
+    }
+
     private sealed interface DiscreteDispatchAttempt {
         data object INVOKED : DiscreteDispatchAttempt
         data object NO_LONGER_CURRENT : DiscreteDispatchAttempt
@@ -2727,6 +3845,7 @@ class ConsoleServerCore(
         val admitted: AdmittedControlFrame,
         val inputVersion: Long,
         val readinessEpoch: Long,
+        val commissioningSession: ConsoleCommissioningSessionView?,
     )
 
     private data class NeutralPlan(
@@ -2774,7 +3893,52 @@ class ConsoleServerCore(
         val revokedLease: ActiveLease?,
         val neutral: NeutralPlan?,
         val commandTermination: CommandAuthorityTermination? = null,
+        val commissioningTermination: CommissioningTermination? = null,
     )
+    private data class CommissioningStartSnapshot(
+        val observation: ConsoleActuationObservation,
+        val readinessEpoch: Long,
+        val observationEpoch: Long,
+        val commissioningAuthorityEpoch: Long,
+        val operatorSession: ConsoleSession?,
+    )
+    private data class PreparedCommissioningTermination(
+        val transition: CommissioningTermination?,
+        val stale: Boolean,
+    )
+    private data class CommissioningTermination(
+        val session: ConsoleCommissioningSessionView,
+        val reason: ConsoleCommissioningTerminationReason,
+        val revokedLease: ActiveLease?,
+        val affectedLease: ActiveLease?,
+        val neutral: NeutralPlan?,
+        val commandTermination: CommandAuthorityTermination?,
+        val cancelledCommand: CancelledCommissioningCommand?,
+        val deadlineTask: ConsoleScheduledTask?,
+        val evidenceTransitionToken: Long,
+        val neutralTransitionToken: Long?,
+    )
+    private data class CancelledCommissioningCommand(
+        val record: CommandRecord,
+        val result: ConsoleCommandResult,
+        val deadlineTask: ConsoleScheduledTask?,
+    )
+    private data class AuditFaultTransition(
+        val revokedLease: ActiveLease?,
+        val commandTermination: CommandAuthorityTermination?,
+        val neutral: NeutralPlan?,
+    )
+    private enum class CommissioningDeadlineAttachDecision {
+        ATTACHED,
+        SCHEDULER_UNAVAILABLE,
+        EXPIRED_CURRENT,
+        STATE_CHANGED_OR_REVOKED,
+    }
+    private sealed interface CommissioningDeadlineAction {
+        data object RESCHEDULE : CommissioningDeadlineAction
+        data object STALE : CommissioningDeadlineAction
+        data class Terminate(val transition: CommissioningTermination?) : CommissioningDeadlineAction
+    }
     private data class CommandAuthorityTermination(
         val record: CommandRecord,
         val actionLease: ActiveLease,
@@ -2835,6 +3999,10 @@ class ConsoleServerCore(
     companion object {
         private const val ACTUATION_ADMISSION_CLOSED_REASON = "actuation_admission_closed"
         private const val NANOS_PER_MILLI = 1_000_000L
+        private const val MAX_SYNCHRONOUS_DEADLINE_REPLACEMENTS = 1
+        private const val DEADLINE_CALLBACK_SCHEDULING = 0
+        private const val DEADLINE_CALLBACK_ATTACHED = 1
+        private const val DEADLINE_CALLBACK_EARLY = 2
     }
 }
 

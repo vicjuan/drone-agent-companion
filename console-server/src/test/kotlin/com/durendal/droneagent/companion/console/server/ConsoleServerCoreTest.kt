@@ -394,7 +394,7 @@ class ConsoleServerCoreTest {
     }
 
     @Test
-    fun `lease TTL starts at durable commit and expiry can never overtake HELD publication`() {
+    fun `lease TTL starts at durable commit and expiry before deadline attachment is never published HELD`() {
         val blocked = Fixture()
         blocked.core.openSession("session-a")
         blocked.audit.blockKind = ConsoleAuditKind.LEASE_ACQUIRED
@@ -416,12 +416,14 @@ class ConsoleServerCoreTest {
             immediateExpiry.clock.advanceMillis(1_001L)
             immediateExpiry.scheduler.runDue()
         }
-        immediateExpiry.core.acquireLease("session-a", 1_000L)
+        val expiredBeforeAttach = immediateExpiry.core.acquireLease("session-a", 1_000L)
         val states =
             immediateExpiry.events.events.mapNotNull {
                 (it.second as? ConsoleCoreEvent.LeaseChanged)?.state?.status
             }
-        assertTrue(states.indexOf(ConsoleLeaseStatus.HELD) < states.indexOf(ConsoleLeaseStatus.EXPIRED))
+        assertEquals(ConsoleLeaseStatus.DENIED, expiredBeforeAttach.status)
+        assertFalse(states.contains(ConsoleLeaseStatus.HELD))
+        assertTrue(states.contains(ConsoleLeaseStatus.EXPIRED))
         assertNull(immediateExpiry.core.currentLease())
     }
 
@@ -771,6 +773,130 @@ class ConsoleServerCoreTest {
         fixture.audit.unblock.countDown()
         assertEquals(ConsoleLeaseStatus.RELEASED, release.get(1, TimeUnit.SECONDS).status)
         pool.shutdownNow()
+    }
+
+    @Test
+    fun `neutral request audit failure preserves the terminating command barrier`() {
+        val fixture = Fixture()
+        fixture.core.openSession("session-a")
+        val lease = checkNotNull(fixture.core.acquireLease("session-a", 5_000L).leaseId)
+        fixture.executor.completeDiscreteImmediately = false
+        assertEquals(
+            ConsoleCommandDecision.ACCEPTED,
+            fixture.core.handleDiscreteCommand(
+                "session-a",
+                ConsoleDiscreteCommand(
+                    "neutral-audit-failure-command",
+                    lease,
+                    ConsoleDiscreteAction.TAKEOFF,
+                    1_000L,
+                ),
+            ).decision,
+        )
+        assertEquals(1, fixture.executor.discrete.size)
+        assertEquals(1, fixture.executor.neutralCalls.size)
+
+        fixture.executor.completeNeutralImmediately = false
+        fixture.audit.failKinds += ConsoleAuditKind.SAFETY_NEUTRAL_REQUESTED
+        assertTrue(fixture.core.updateActuationReadiness(ConsoleActuationReadinessSnapshot.UNAVAILABLE))
+
+        // The audit-fault cascade must retain, not replace, the neutral plan that owns the
+        // TERMINATING command completion.
+        assertEquals(2, fixture.executor.neutralCalls.size)
+        fixture.executor.completeNextNeutral(
+            ConsoleExecutionResult(true, detail = "terminal neutral completed"),
+        )
+        val afterNeutral =
+            fixture.events.events.mapNotNull { it.second as? ConsoleCoreEvent.CommandCompleted }
+                .filter { it.result.commandId == "neutral-audit-failure-command" }
+        assertEquals(1, afterNeutral.size)
+        assertEquals(ConsoleCommandOutcome.FAILED, afterNeutral.single().result.outcome)
+        assertEquals("actuation_readiness_lost", afterNeutral.single().result.reason)
+        assertEquals(2, fixture.executor.neutralCalls.size)
+
+        fixture.executor.completeNextDiscrete(
+            ConsoleExecutionResult(true, detail = "late executor success"),
+        )
+        val afterLateSuccess =
+            fixture.events.events.mapNotNull { it.second as? ConsoleCoreEvent.CommandCompleted }
+                .filter { it.result.commandId == "neutral-audit-failure-command" }
+        assertEquals(1, afterLateSuccess.size)
+        assertEquals("audit_unavailable", fixture.core.acquireLease("session-a", 5_000L).reason)
+    }
+
+    @Test
+    fun `pending lease reservation cannot cross an identical session id reconnect`() {
+        val fixture = Fixture()
+        fixture.core.openSession("session-a", "browser-a")
+        val firstAuditEntered = CountDownLatch(1)
+        val releaseFirstAudit = CountDownLatch(1)
+        fixture.audit.afterNextRecord = { event ->
+            if (event.kind == ConsoleAuditKind.LEASE_ACQUIRED) {
+                firstAuditEntered.countDown()
+                check(releaseFirstAudit.await(2L, TimeUnit.SECONDS)) {
+                    "timed out waiting to release first lease audit"
+                }
+            }
+        }
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val first = pool.submit(Callable { fixture.core.acquireLease("session-a", 5_000L) })
+            assertTrue(firstAuditEntered.await(1L, TimeUnit.SECONDS))
+
+            fixture.audit.blockKind = ConsoleAuditKind.LEASE_ACQUIRED
+            fixture.core.disconnect("session-a")
+            fixture.core.openSession("session-a", "browser-a")
+            val second = pool.submit(Callable { fixture.core.acquireLease("session-a", 5_000L) })
+            assertTrue(fixture.audit.blockEntered.await(1L, TimeUnit.SECONDS))
+
+            releaseFirstAudit.countDown()
+            val refusedOldReservation = first.get(1L, TimeUnit.SECONDS)
+            assertEquals(ConsoleLeaseStatus.DENIED, refusedOldReservation.status)
+            assertEquals("state_changed", refusedOldReservation.reason)
+            assertNull(fixture.core.currentLease())
+
+            fixture.audit.unblock.countDown()
+            val currentReservation = second.get(1L, TimeUnit.SECONDS)
+            assertEquals(ConsoleLeaseStatus.HELD, currentReservation.status)
+            assertEquals(currentReservation.leaseId, fixture.core.currentLease()?.leaseId)
+        } finally {
+            releaseFirstAudit.countDown()
+            fixture.audit.unblock.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `queued lease-releasing command cannot cross an identical session id reconnect`() {
+        listOf(ConsoleDiscreteAction.LANDING, ConsoleDiscreteAction.RETURN_TO_HOME).forEach { action ->
+            val fixture = Fixture()
+            fixture.core.openSession("session-a", "browser-a")
+            val lease = checkNotNull(fixture.core.acquireLease("session-a", 5_000L).leaseId)
+            fixture.executor.completeNeutralImmediately = false
+            val commandId = "queued-${action.name.lowercase()}"
+            assertEquals(
+                ConsoleCommandDecision.ACCEPTED,
+                fixture.core.handleDiscreteCommand(
+                    "session-a",
+                    ConsoleDiscreteCommand(commandId, lease, action, 1_000L),
+                ).decision,
+            )
+            assertTrue(fixture.executor.discrete.isEmpty())
+
+            fixture.core.disconnect("session-a")
+            fixture.core.openSession("session-a", "browser-a")
+            fixture.executor.completeNextNeutral(
+                ConsoleExecutionResult(true, detail = "pre-action neutral completed"),
+            )
+
+            assertTrue("old $action reached executor", fixture.executor.discrete.isEmpty())
+            val completions =
+                fixture.events.events.mapNotNull { it.second as? ConsoleCoreEvent.CommandCompleted }
+                    .filter { it.result.commandId == commandId }
+            assertEquals("completion count for $action", 1, completions.size)
+            assertEquals(ConsoleCommandOutcome.FAILED, completions.single().result.outcome)
+            assertEquals("authority_lost", completions.single().result.reason)
+        }
     }
 
     @Test
@@ -1569,39 +1695,946 @@ class ConsoleServerCoreTest {
     }
 
     @Test
-    fun `DJI commissioning requires server-owned session and per-intent allow-list`() {
-        val takeoffOnly =
-            ConsoleActuationReadinessSnapshot(
-                adapter = AdapterKind.DJI,
-                aircraftConnection = AircraftConnectionState.CONNECTED,
-                actuationLock = ActuationLockState.UNLOCKED,
-                operatingProfile = OperatingProfile.HARDWARE_COMMISSIONING,
-                commissioningAuthority =
-                    ConsoleCommissioningAuthority(
-                        "session-a",
-                        setOf(ConsoleActuationIntent.TAKEOFF),
-                    ),
+    fun `hardware commissioning keeps public lock locked and scopes all four intent gates`() {
+        assertEquals(ActuationLockState.LOCKED, DJI_COMMISSIONING_READINESS.actuationLock)
+
+        ConsoleDiscreteAction.entries.forEach { action ->
+            val fixture = commissioningFixture()
+            fixture.core.openSession("session-a")
+            fixture.core.openSession("session-b")
+            val started =
+                fixture.core.startHardwareCommissioning(
+                    "session-a",
+                    setOf(action.actuationIntent),
+                    5_000L,
+                )
+
+            assertEquals(ConsoleCommissioningStartDecision.STARTED, started.decision)
+            assertEquals(
+                "different operator for $action",
+                "actuation_not_ready",
+                fixture.core.acquireLease("session-b", 5_000L).reason,
             )
-        val fixture = Fixture(initialReadiness = takeoffOnly)
+            val lease = checkNotNull(fixture.core.acquireLease("session-a", 5_000L).leaseId)
+            val ack =
+                fixture.core.handleDiscreteCommand(
+                    "session-a",
+                    ConsoleDiscreteCommand("commissioning-${action.name.lowercase()}", lease, action, 500L),
+                )
+
+            assertEquals("positive $action", ConsoleCommandDecision.ACCEPTED, ack.decision)
+            assertEquals(listOf(action), fixture.executor.discrete.map { it.command.action })
+        }
+
+        val controlFixture = commissioningFixture()
+        controlFixture.core.openSession("session-a")
+        assertEquals(
+            ConsoleCommissioningStartDecision.STARTED,
+            controlFixture.core.startHardwareCommissioning(
+                "session-a",
+                setOf(ConsoleActuationIntent.VIRTUAL_STICK),
+                5_000L,
+            ).decision,
+        )
+        val controlLease = checkNotNull(controlFixture.core.acquireLease("session-a", 5_000L).leaseId)
+        assertEquals(
+            ConsoleControlStatus.APPLIED,
+            controlFixture.core.handleControlFrame("session-a", frame(controlLease, 1L)).status,
+        )
+        assertEquals(1, controlFixture.executor.controls.size)
+
+        val allowListFixture = commissioningFixture()
+        allowListFixture.core.openSession("session-a")
+        allowListFixture.core.startHardwareCommissioning(
+            "session-a",
+            setOf(ConsoleActuationIntent.TAKEOFF),
+            5_000L,
+        )
+        val allowListLease = checkNotNull(allowListFixture.core.acquireLease("session-a", 5_000L).leaseId)
+        val denied =
+            allowListFixture.core.handleDiscreteCommand(
+                "session-a",
+                ConsoleDiscreteCommand(
+                    "commissioning-not-allowed",
+                    allowListLease,
+                    ConsoleDiscreteAction.LANDING,
+                    500L,
+                ),
+            )
+        assertEquals(ConsoleCommandDecision.REJECTED, denied.decision)
+        assertEquals("actuation_not_ready", denied.reason)
+        assertTrue(allowListFixture.executor.discrete.isEmpty())
+    }
+
+    @Test
+    fun `blocked start audit rejects disconnect reopen of the identical operator session`() {
+        val fixture = commissioningFixture()
+        fixture.core.openSession("session-a", "browser-a")
+        fixture.audit.blockKind = ConsoleAuditKind.COMMISSIONING_STARTED
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val start =
+                pool.submit(
+                    Callable {
+                        fixture.core.startHardwareCommissioning(
+                            "session-a",
+                            setOf(ConsoleActuationIntent.TAKEOFF),
+                            5_000L,
+                        )
+                    },
+                )
+            assertTrue(fixture.audit.blockEntered.await(1L, TimeUnit.SECONDS))
+            assertNull(fixture.commissioningLifecycle.currentSession())
+
+            // Deliberately preserve every readiness/observation value and all session metadata.
+            // Only the transport-owned ConsoleSession instance changes.
+            fixture.core.disconnect("session-a")
+            fixture.core.openSession("session-a", "browser-a")
+            fixture.audit.unblock.countDown()
+
+            val result = start.get(1L, TimeUnit.SECONDS)
+            assertEquals(ConsoleCommissioningStartDecision.STATE_CHANGED, result.decision)
+            assertNull(result.session)
+            assertNull(fixture.commissioningLifecycle.currentSession())
+            assertNull(fixture.core.currentLease())
+            assertEquals("actuation_not_ready", fixture.core.acquireLease("session-a", 5_000L).reason)
+            assertTrue(fixture.executor.neutralCalls.isEmpty())
+            assertTrue(
+                fixture.audit.events.any {
+                    it.kind == ConsoleAuditKind.COMMISSIONING_TERMINATED &&
+                        it.outcome == "start_aborted" && it.reason == "state_changed"
+                },
+            )
+        } finally {
+            fixture.audit.unblock.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `blocked commissioning start audit fences mock lease and control side effects`() {
+        val fixture = commissioningFixture()
         fixture.core.openSession("session-a")
-        fixture.core.openSession("session-b")
+        fixture.audit.blockKind = ConsoleAuditKind.COMMISSIONING_STARTED
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val start =
+                pool.submit(
+                    Callable {
+                        fixture.core.startHardwareCommissioning(
+                            "session-a",
+                            setOf(ConsoleActuationIntent.VIRTUAL_STICK),
+                            5_000L,
+                        )
+                    },
+                )
+            assertTrue(fixture.audit.blockEntered.await(1L, TimeUnit.SECONDS))
+            assertTrue(fixture.core.updateActuationReadiness(ConsoleActuationReadinessSnapshot.MOCK_READY))
 
-        assertEquals("actuation_not_ready", fixture.core.acquireLease("session-b", 5_000L).reason)
+            val blockedLease = fixture.core.acquireLease("session-a", 5_000L)
+            assertEquals(ConsoleLeaseStatus.DENIED, blockedLease.status)
+            assertEquals("actuation_not_ready", blockedLease.reason)
+            assertTrue(fixture.executor.controls.isEmpty())
+            assertTrue(fixture.executor.discrete.isEmpty())
+
+            fixture.audit.unblock.countDown()
+            assertEquals(
+                ConsoleCommissioningStartDecision.STATE_CHANGED,
+                start.get(1L, TimeUnit.SECONDS).decision,
+            )
+            assertNull(fixture.commissioningLifecycle.currentSession())
+            assertEquals(
+                ConsoleLeaseStatus.HELD,
+                fixture.core.acquireLease("session-a", 5_000L).status,
+            )
+        } finally {
+            fixture.audit.unblock.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `close defers server-stopped evidence until a pending start audit is terminalized`() {
+        val fixture = commissioningFixture()
+        fixture.core.openSession("session-a")
+        fixture.audit.blockKind = ConsoleAuditKind.COMMISSIONING_STARTED
+        val pool = Executors.newFixedThreadPool(3)
+        try {
+            val start =
+                pool.submit(
+                    Callable {
+                        fixture.core.startHardwareCommissioning(
+                            "session-a",
+                            setOf(ConsoleActuationIntent.TAKEOFF),
+                            5_000L,
+                        )
+                    },
+                )
+            assertTrue(fixture.audit.blockEntered.await(1L, TimeUnit.SECONDS))
+            val closing = pool.submit(Callable { fixture.core.close() })
+            closing.get(1L, TimeUnit.SECONDS)
+            assertTrue(
+                fixture.audit.attempts.none { it.kind == ConsoleAuditKind.SERVER_STOPPED },
+            )
+            val awaiting = pool.submit(Callable { fixture.core.awaitShutdownNeutral(1_000L) })
+            assertFalse(awaiting.isDone)
+
+            fixture.audit.unblock.countDown()
+            assertEquals(
+                ConsoleCommissioningStartDecision.STATE_CHANGED,
+                start.get(1L, TimeUnit.SECONDS).decision,
+            )
+            assertTrue(awaiting.get(1L, TimeUnit.SECONDS))
+            val orderedKinds = fixture.audit.events.map { it.kind }
+            val startIndex = orderedKinds.indexOf(ConsoleAuditKind.COMMISSIONING_STARTED)
+            val abortIndex = fixture.audit.events.indexOfFirst {
+                it.kind == ConsoleAuditKind.COMMISSIONING_TERMINATED &&
+                    it.outcome == "start_aborted"
+            }
+            val stoppedIndex = orderedKinds.indexOf(ConsoleAuditKind.SERVER_STOPPED)
+            assertTrue(startIndex >= 0)
+            assertTrue(abortIndex > startIndex)
+            assertTrue(stoppedIndex > abortIndex)
+        } finally {
+            fixture.audit.unblock.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `no-lease terminal audit blocks replacement commissioning and mock lease`() {
+        val fixture = commissioningFixture()
+        fixture.core.openSession("session-a")
+        val grant =
+            checkNotNull(
+                fixture.core.startHardwareCommissioning(
+                    "session-a",
+                    setOf(ConsoleActuationIntent.TAKEOFF),
+                    5_000L,
+                ).session,
+            )
+        assertNull(fixture.core.currentLease())
+        fixture.audit.blockKind = ConsoleAuditKind.COMMISSIONING_TERMINATED
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val revoke =
+                pool.submit(
+                    Callable { fixture.core.revokeHardwareCommissioning(grant) },
+                )
+            assertTrue(fixture.audit.blockEntered.await(1L, TimeUnit.SECONDS))
+
+            assertFalse(revoke.isDone)
+            assertNull(fixture.commissioningLifecycle.currentSession())
+            assertTrue(fixture.executor.neutralCalls.isEmpty())
+            val replacement =
+                fixture.core.startHardwareCommissioning(
+                    "session-a",
+                    setOf(ConsoleActuationIntent.TAKEOFF),
+                    5_000L,
+                )
+            assertEquals(ConsoleCommissioningStartDecision.STATE_CHANGED, replacement.decision)
+            assertNull(replacement.session)
+
+            assertTrue(fixture.core.updateActuationReadiness(ConsoleActuationReadinessSnapshot.MOCK_READY))
+            val whileTerminalAuditBlocked = fixture.core.acquireLease("session-a", 5_000L)
+            assertEquals(ConsoleLeaseStatus.DENIED, whileTerminalAuditBlocked.status)
+            assertEquals("actuation_not_ready", whileTerminalAuditBlocked.reason)
+
+            fixture.audit.unblock.countDown()
+            assertEquals(
+                ConsoleCommissioningRevokeDecision.REVOKED,
+                revoke.get(1L, TimeUnit.SECONDS),
+            )
+            assertEquals(
+                ConsoleLeaseStatus.HELD,
+                fixture.core.acquireLease("session-a", 5_000L).status,
+            )
+        } finally {
+            fixture.audit.unblock.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `start-aborted audit blocks mock lease until the reservation transition completes`() {
+        val fixture = commissioningFixture()
+        fixture.core.openSession("session-a")
+        fixture.audit.afterNextRecord = { event ->
+            if (event.kind == ConsoleAuditKind.COMMISSIONING_STARTED) {
+                fixture.core.updateActuationReadiness(ConsoleActuationReadinessSnapshot.MOCK_READY)
+            }
+        }
+        fixture.audit.blockKind = ConsoleAuditKind.COMMISSIONING_TERMINATED
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val start =
+                pool.submit(
+                    Callable {
+                        fixture.core.startHardwareCommissioning(
+                            "session-a",
+                            setOf(ConsoleActuationIntent.TAKEOFF),
+                            5_000L,
+                        )
+                    },
+                )
+            assertTrue(fixture.audit.blockEntered.await(1L, TimeUnit.SECONDS))
+
+            assertFalse(start.isDone)
+            assertNull(fixture.commissioningLifecycle.currentSession())
+            assertTrue(
+                fixture.audit.attempts.any {
+                    it.kind == ConsoleAuditKind.COMMISSIONING_TERMINATED &&
+                        it.outcome == "start_aborted"
+                },
+            )
+            val whileAbortAuditBlocked = fixture.core.acquireLease("session-a", 5_000L)
+            assertEquals(ConsoleLeaseStatus.DENIED, whileAbortAuditBlocked.status)
+            assertEquals("actuation_not_ready", whileAbortAuditBlocked.reason)
+
+            fixture.audit.unblock.countDown()
+            val result = start.get(1L, TimeUnit.SECONDS)
+            assertEquals(ConsoleCommissioningStartDecision.STATE_CHANGED, result.decision)
+            assertNull(result.session)
+            assertEquals(
+                ConsoleLeaseStatus.HELD,
+                fixture.core.acquireLease("session-a", 5_000L).status,
+            )
+        } finally {
+            fixture.audit.unblock.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `every commissioning terminal path revokes the grant and lease with fresh neutral`() {
+        data class TerminalCase(
+            val label: String,
+            val expectedReason: String,
+            val terminate: (Fixture, ConsoleCommissioningSessionView) -> Unit,
+        )
+
+        val cases =
+            listOf(
+                TerminalCase("host revoke", "host_revoked") { fixture, grant ->
+                    assertEquals(
+                        ConsoleCommissioningRevokeDecision.REVOKED,
+                        fixture.core.revokeHardwareCommissioning(grant),
+                    )
+                },
+                TerminalCase("expiry", "ttl_expired") { fixture, _ ->
+                    fixture.clock.advanceMillis(1_000L)
+                    fixture.scheduler.runDue()
+                },
+                TerminalCase("disconnect", "operator_disconnected") { fixture, _ ->
+                    fixture.core.disconnect("session-a")
+                },
+                TerminalCase("observation loss", "observation_lost") { fixture, _ ->
+                    assertTrue(
+                        fixture.core.updateActuationObservation(
+                            ConsoleActuationObservation(
+                                adapter = AdapterKind.DJI,
+                                aircraftConnection = AircraftConnectionState.CONNECTED,
+                                adapterActuationReady = false,
+                                operatingProfile = OperatingProfile.HARDWARE_COMMISSIONING,
+                            ),
+                        ),
+                    )
+                },
+            )
+
+        cases.forEach { case ->
+            val fixture = commissioningFixture()
+            fixture.core.openSession("session-a")
+            val grant =
+                checkNotNull(
+                    fixture.core.startHardwareCommissioning(
+                        "session-a",
+                        setOf(ConsoleActuationIntent.VIRTUAL_STICK),
+                        1_000L,
+                    ).session,
+                )
+            val lease = checkNotNull(fixture.core.acquireLease("session-a", 5_000L).leaseId)
+            fixture.core.handleControlFrame("session-a", frame(lease, 1L))
+            fixture.core.handleControlNeutral(
+                "session-a",
+                ConsoleControlNeutral(lease, 2L, ConsoleNeutralRequestReason.WINDOW_BLUR),
+            )
+            assertEquals("precondition ${case.label}", 1, fixture.executor.neutralCalls.size)
+
+            case.terminate(fixture, grant)
+
+            assertNull("lease after ${case.label}", fixture.core.currentLease())
+            assertNull("grant after ${case.label}", fixture.commissioningLifecycle.currentSession())
+            assertEquals("fresh neutral for ${case.label}", 2, fixture.executor.neutralCalls.size)
+            assertEquals(
+                "terminal trigger for ${case.label}",
+                ConsoleSafetyTrigger.ACTUATION_READINESS_LOST,
+                fixture.executor.neutralCalls.last().second,
+            )
+            assertTrue(
+                "terminal audit for ${case.label}",
+                fixture.audit.events.any {
+                    it.kind == ConsoleAuditKind.COMMISSIONING_TERMINATED &&
+                        it.subjectId == grant.commissioningId && it.reason == case.expectedReason
+                },
+            )
+        }
+    }
+
+    @Test
+    fun `commissioning audit failures fail closed and terminal audit follows neutral invocation`() {
+        val startFailure = commissioningFixture()
+        startFailure.core.openSession("session-a")
+        startFailure.audit.failKinds += ConsoleAuditKind.COMMISSIONING_STARTED
+        val refused =
+            startFailure.core.startHardwareCommissioning(
+                "session-a",
+                setOf(ConsoleActuationIntent.TAKEOFF),
+                5_000L,
+            )
+        assertEquals(ConsoleCommissioningStartDecision.AUDIT_UNAVAILABLE, refused.decision)
+        assertNull(startFailure.commissioningLifecycle.currentSession())
+        assertEquals("audit_unavailable", startFailure.core.acquireLease("session-a", 5_000L).reason)
+
+        val blockedTerminal = commissioningFixture()
+        blockedTerminal.core.openSession("session-a")
+        val blockedGrant =
+            checkNotNull(
+                blockedTerminal.core.startHardwareCommissioning(
+                    "session-a",
+                    setOf(ConsoleActuationIntent.TAKEOFF),
+                    5_000L,
+                ).session,
+            )
+        blockedTerminal.core.acquireLease("session-a", 5_000L)
+        blockedTerminal.audit.blockKind = ConsoleAuditKind.COMMISSIONING_TERMINATED
+        val pool = Executors.newSingleThreadExecutor()
+        val revoke = pool.submit(Callable { blockedTerminal.core.revokeHardwareCommissioning(blockedGrant) })
+        assertTrue(blockedTerminal.audit.blockEntered.await(1L, TimeUnit.SECONDS))
+        assertNull(blockedTerminal.commissioningLifecycle.currentSession())
+        assertNull(blockedTerminal.core.currentLease())
+        assertEquals(1, blockedTerminal.executor.neutralCalls.size)
+        assertTrue(blockedTerminal.audit.attempts.any { it.kind == ConsoleAuditKind.COMMISSIONING_TERMINATED })
+        blockedTerminal.audit.unblock.countDown()
+        assertEquals(ConsoleCommissioningRevokeDecision.REVOKED, revoke.get(1L, TimeUnit.SECONDS))
+        pool.shutdownNow()
+
+        val failedTerminal = commissioningFixture()
+        failedTerminal.core.openSession("session-a")
+        val failedGrant =
+            checkNotNull(
+                failedTerminal.core.startHardwareCommissioning(
+                    "session-a",
+                    setOf(ConsoleActuationIntent.TAKEOFF),
+                    5_000L,
+                ).session,
+            )
+        failedTerminal.core.acquireLease("session-a", 5_000L)
+        failedTerminal.audit.failKinds += ConsoleAuditKind.COMMISSIONING_TERMINATED
+        assertEquals(
+            ConsoleCommissioningRevokeDecision.REVOKED_AUDIT_UNAVAILABLE,
+            failedTerminal.core.revokeHardwareCommissioning(failedGrant),
+        )
+        assertNull(failedTerminal.commissioningLifecycle.currentSession())
+        assertNull(failedTerminal.core.currentLease())
+        assertEquals(1, failedTerminal.executor.neutralCalls.size)
+        assertEquals("audit_unavailable", failedTerminal.core.acquireLease("session-a", 5_000L).reason)
+    }
+
+    @Test
+    fun `same id stale expiry and pre-action callback cannot affect a replacement generation`() {
+        val lifecycle = ConsoleCommissioningLifecycle { FIXED_COMMISSIONING_ID }
+        val fixture = commissioningFixture(lifecycle)
+        fixture.core.openSession("session-a")
+        val first =
+            checkNotNull(
+                fixture.core.startHardwareCommissioning(
+                    "session-a",
+                    setOf(ConsoleActuationIntent.TAKEOFF),
+                    5_000L,
+                ).session,
+            )
+        val staleDeadline = fixture.scheduler.tasks.single()
         val lease = checkNotNull(fixture.core.acquireLease("session-a", 5_000L).leaseId)
-        val landing =
+        fixture.executor.completeNeutralImmediately = false
+        assertEquals(
+            ConsoleCommandDecision.ACCEPTED,
             fixture.core.handleDiscreteCommand(
                 "session-a",
-                ConsoleDiscreteCommand("landing-denied", lease, ConsoleDiscreteAction.LANDING, 500L),
+                ConsoleDiscreteCommand("stale-generation", lease, ConsoleDiscreteAction.TAKEOFF, 1_000L),
+            ).decision,
+        )
+        assertTrue(fixture.executor.discrete.isEmpty())
+
+        assertEquals(
+            ConsoleCommissioningRevokeDecision.REVOKED,
+            fixture.core.revokeHardwareCommissioning(first),
+        )
+        fixture.executor.completeLastNeutral(ConsoleExecutionResult(true, detail = "terminal neutral"))
+        val replacement =
+            checkNotNull(
+                fixture.core.startHardwareCommissioning(
+                    "session-a",
+                    setOf(ConsoleActuationIntent.TAKEOFF),
+                    5_000L,
+                ).session,
             )
-        val takeoff =
-            fixture.core.handleDiscreteCommand(
+        assertEquals(first.commissioningId, replacement.commissioningId)
+        assertTrue(replacement.generation > first.generation)
+
+        fixture.scheduler.forceRun(staleDeadline)
+        fixture.executor.completeNextNeutral(ConsoleExecutionResult(true, detail = "stale pre-action neutral"))
+
+        assertEquals(replacement.generation, fixture.commissioningLifecycle.currentSession()?.generation)
+        assertTrue(fixture.executor.discrete.isEmpty())
+        assertEquals(
+            ConsoleLeaseStatus.HELD,
+            fixture.core.acquireLease("session-a", 5_000L).status,
+        )
+    }
+
+    @Test
+    fun `synchronous commissioning deadline callback is replaced without recursive scheduling`() {
+        val fixture = commissioningFixture()
+        fixture.core.openSession("session-a")
+        fixture.scheduler.invokeNextTaskSynchronously = true
+
+        val started =
+            fixture.core.startHardwareCommissioning(
                 "session-a",
-                ConsoleDiscreteCommand("takeoff-allowed", lease, ConsoleDiscreteAction.TAKEOFF, 500L),
+                setOf(ConsoleActuationIntent.TAKEOFF),
+                1_000L,
             )
 
-        assertEquals("actuation_not_ready", landing.reason)
-        assertEquals(ConsoleCommandDecision.ACCEPTED, takeoff.decision)
-        assertEquals(listOf(ConsoleDiscreteAction.TAKEOFF), fixture.executor.discrete.map { it.command.action })
+        assertEquals(ConsoleCommissioningStartDecision.STARTED, started.decision)
+        assertEquals(0, fixture.scheduler.reentrantScheduleCalls)
+        assertNotNull(fixture.commissioningLifecycle.currentSession())
+        fixture.clock.advanceMillis(1_000L)
+        fixture.scheduler.runDue()
+        assertNull(fixture.commissioningLifecycle.currentSession())
+    }
+
+    @Test
+    fun `repeated inline scheduler callbacks fail every actuation deadline closed without recursion`() {
+        val leaseFixture = Fixture()
+        leaseFixture.core.openSession("session-a")
+        leaseFixture.scheduler.invokeEveryTaskSynchronously = true
+        val lease = leaseFixture.core.acquireLease("session-a", 1_000L)
+        assertEquals(ConsoleLeaseStatus.DENIED, lease.status)
+        assertEquals("lease_deadline_unavailable", lease.reason)
+        assertEquals(0, leaseFixture.scheduler.reentrantScheduleCalls)
+        assertNull(leaseFixture.core.currentLease())
+        assertEquals(1, leaseFixture.executor.neutralCalls.size)
+
+        val commandFixture = Fixture()
+        commandFixture.core.openSession("session-a")
+        val commandLease = checkNotNull(commandFixture.core.acquireLease("session-a", 5_000L).leaseId)
+        commandFixture.scheduler.invokeEveryTaskSynchronously = true
+        val commandAck =
+            commandFixture.core.handleDiscreteCommand(
+                "session-a",
+                ConsoleDiscreteCommand(
+                    "inline-scheduler-command",
+                    commandLease,
+                    ConsoleDiscreteAction.TAKEOFF,
+                    1_000L,
+                ),
+            )
+        assertEquals(ConsoleCommandDecision.ACCEPTED, commandAck.decision)
+        assertEquals(0, commandFixture.scheduler.reentrantScheduleCalls)
+        assertTrue(commandFixture.executor.discrete.isEmpty())
+        val commandResult =
+            commandFixture.events.events.mapNotNull { it.second as? ConsoleCoreEvent.CommandCompleted }
+                .single { it.result.commandId == "inline-scheduler-command" }.result
+        assertEquals(ConsoleCommandOutcome.FAILED, commandResult.outcome)
+        assertEquals("command_deadline_unavailable", commandResult.reason)
+
+        val controlFixture = Fixture()
+        controlFixture.core.openSession("session-a")
+        val controlLease = checkNotNull(controlFixture.core.acquireLease("session-a", 5_000L).leaseId)
+        controlFixture.scheduler.invokeEveryTaskSynchronously = true
+        val control = controlFixture.core.handleControlFrame("session-a", frame(controlLease, 1L))
+        assertEquals(ConsoleControlStatus.REJECTED, control.status)
+        assertEquals("control_deadline_unavailable", control.reason)
+        assertEquals(0, controlFixture.scheduler.reentrantScheduleCalls)
+        assertTrue(controlFixture.executor.controls.isEmpty())
+        assertEquals(1, controlFixture.executor.neutralCalls.size)
+    }
+
+    @Test
+    fun `command and control cannot attach an already expired deadline task`() {
+        val commandFixture = Fixture()
+        commandFixture.core.openSession("session-a")
+        val commandLease = checkNotNull(commandFixture.core.acquireLease("session-a", 5_000L).leaseId)
+        commandFixture.scheduler.afterNextSchedule = { commandFixture.clock.advanceMillis(1_001L) }
+        val ack =
+            commandFixture.core.handleDiscreteCommand(
+                "session-a",
+                ConsoleDiscreteCommand(
+                    "expired-before-command-attach",
+                    commandLease,
+                    ConsoleDiscreteAction.TAKEOFF,
+                    1_000L,
+                ),
+            )
+        assertEquals(ConsoleCommandDecision.ACCEPTED, ack.decision)
+        assertTrue(commandFixture.executor.discrete.isEmpty())
+        val commandResult =
+            commandFixture.events.events.mapNotNull { it.second as? ConsoleCoreEvent.CommandCompleted }
+                .single { it.result.commandId == "expired-before-command-attach" }.result
+        assertEquals(ConsoleCommandOutcome.TIMED_OUT, commandResult.outcome)
+        assertEquals("command_ttl_expired", commandResult.reason)
+        assertEquals(2, commandFixture.scheduler.tasks.size)
+
+        val controlFixture = Fixture()
+        controlFixture.core.openSession("session-a")
+        val controlLease = checkNotNull(controlFixture.core.acquireLease("session-a", 5_000L).leaseId)
+        controlFixture.scheduler.afterNextSchedule = { controlFixture.clock.advanceMillis(101L) }
+        val control = controlFixture.core.handleControlFrame("session-a", frame(controlLease, 1L))
+        assertEquals(ConsoleControlStatus.REJECTED, control.status)
+        assertEquals("control_ttl_expired", control.reason)
+        assertTrue(controlFixture.executor.controls.isEmpty())
+        assertEquals(1, controlFixture.executor.neutralCalls.size)
+        assertEquals(2, controlFixture.scheduler.tasks.size)
+    }
+
+    @Test
+    fun `lease authority stays fenced until initial and renewed deadline tasks attach`() {
+        val initial = Fixture()
+        initial.core.openSession("session-a")
+        initial.scheduler.blockNextScheduleReturn = true
+        val initialPool = Executors.newSingleThreadExecutor()
+        try {
+            val acquiring = initialPool.submit(Callable { initial.core.acquireLease("session-a", 5_000L) })
+            assertTrue(initial.scheduler.blockedScheduleEntered.await(1L, TimeUnit.SECONDS))
+            assertNull(initial.core.currentLease())
+            val blockedControl = initial.core.handleControlFrame("session-a", frame("lease-1", 1L))
+            assertEquals(ConsoleControlStatus.REJECTED, blockedControl.status)
+            assertEquals("actuation_not_ready", blockedControl.reason)
+            assertTrue(initial.executor.controls.isEmpty())
+
+            initial.scheduler.releaseBlockedSchedule.countDown()
+            assertEquals(ConsoleLeaseStatus.HELD, acquiring.get(1L, TimeUnit.SECONDS).status)
+        } finally {
+            initial.scheduler.releaseBlockedSchedule.countDown()
+            initialPool.shutdownNow()
+        }
+
+        val renewed = Fixture()
+        renewed.core.openSession("session-a")
+        val leaseId = checkNotNull(renewed.core.acquireLease("session-a", 5_000L).leaseId)
+        renewed.scheduler.blockNextScheduleReturn = true
+        val renewPool = Executors.newSingleThreadExecutor()
+        try {
+            val renewing = renewPool.submit(Callable { renewed.core.renewLease("session-a", leaseId, 5_000L) })
+            assertTrue(renewed.scheduler.blockedScheduleEntered.await(1L, TimeUnit.SECONDS))
+            assertNull(renewed.core.currentLease())
+            val blockedControl = renewed.core.handleControlFrame("session-a", frame(leaseId, 1L))
+            assertEquals(ConsoleControlStatus.REJECTED, blockedControl.status)
+            assertEquals("actuation_not_ready", blockedControl.reason)
+            assertTrue(renewed.executor.controls.isEmpty())
+
+            renewed.scheduler.releaseBlockedSchedule.countDown()
+            assertEquals(ConsoleLeaseStatus.HELD, renewing.get(1L, TimeUnit.SECONDS).status)
+        } finally {
+            renewed.scheduler.releaseBlockedSchedule.countDown()
+            renewPool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `throwing deadline cancellation cannot skip lease-expiry neutral and command completion`() {
+        val fixture = Fixture()
+        fixture.core.openSession("session-a")
+        val lease = checkNotNull(fixture.core.acquireLease("session-a", 1_000L).leaseId)
+        val leaseDeadline = fixture.scheduler.tasks.single()
+        fixture.executor.completeDiscreteImmediately = false
+        assertEquals(
+            ConsoleCommandDecision.ACCEPTED,
+            fixture.core.handleDiscreteCommand(
+                "session-a",
+                ConsoleDiscreteCommand(
+                    "throwing-cancel-command",
+                    lease,
+                    ConsoleDiscreteAction.TAKEOFF,
+                    5_000L,
+                ),
+            ).decision,
+        )
+        assertEquals(1, fixture.executor.discrete.size)
+        assertEquals(1, fixture.executor.neutralCalls.size)
+
+        fixture.executor.completeNeutralImmediately = false
+        fixture.scheduler.throwOnNextCancel = true
+        fixture.clock.advanceMillis(1_000L)
+        fixture.scheduler.forceRun(leaseDeadline)
+
+        assertNull(fixture.core.currentLease())
+        assertEquals(2, fixture.executor.neutralCalls.size)
+        fixture.executor.completeNextNeutral(
+            ConsoleExecutionResult(true, detail = "lease-expiry neutral completed"),
+        )
+        val completions =
+            fixture.events.events.mapNotNull { it.second as? ConsoleCoreEvent.CommandCompleted }
+                .filter { it.result.commandId == "throwing-cancel-command" }
+        assertEquals(1, completions.size)
+        assertEquals(ConsoleCommandOutcome.FAILED, completions.single().result.outcome)
+        assertEquals("lease_ttl_expired", completions.single().result.reason)
+
+        fixture.executor.completeNextDiscrete(
+            ConsoleExecutionResult(true, detail = "late action success"),
+        )
+        assertEquals(
+            1,
+            fixture.events.events.mapNotNull { it.second as? ConsoleCoreEvent.CommandCompleted }
+                .count { it.result.commandId == "throwing-cancel-command" },
+        )
+    }
+
+    @Test
+    fun `early deadline replacement that crosses expiry terminalizes the current generation`() {
+        val fixture = commissioningFixture()
+        fixture.core.openSession("session-a")
+        val grant =
+            checkNotNull(
+                fixture.core.startHardwareCommissioning(
+                    "session-a",
+                    setOf(ConsoleActuationIntent.TAKEOFF),
+                    1_000L,
+                ).session,
+            )
+        val attachedDeadline = fixture.scheduler.tasks.single()
+        fixture.clock.advanceMillis(500L)
+        fixture.scheduler.afterNextSchedule = { fixture.clock.advanceMillis(500L) }
+
+        // The original task fires early. The replacement schedule call itself advances the
+        // monotonic clock through expiry before Core can attach that replacement.
+        fixture.scheduler.forceRun(attachedDeadline)
+
+        assertNull(fixture.commissioningLifecycle.currentSession())
+        assertNull(fixture.core.currentLease())
+        assertTrue(
+            fixture.audit.events.any {
+                it.kind == ConsoleAuditKind.COMMISSIONING_TERMINATED &&
+                    it.subjectId == grant.commissioningId && it.reason == "ttl_expired"
+            },
+        )
+        assertEquals("actuation_not_ready", fixture.core.acquireLease("session-a", 5_000L).reason)
+    }
+
+    @Test
+    fun `attached early commissioning deadline fences every actuation path while replacement scheduling blocks`() {
+        data class GateCase(
+            val label: String,
+            val needsLease: Boolean,
+            val attempt: (Fixture, String?) -> String?,
+        )
+
+        val cases =
+            listOf(
+                GateCase("lease", needsLease = false) { fixture, _ ->
+                    fixture.core.acquireLease("session-a", 5_000L).reason
+                },
+                GateCase("renew", needsLease = true) { fixture, leaseId ->
+                    fixture.core.renewLease("session-a", checkNotNull(leaseId), 5_000L).reason
+                },
+                GateCase("command", needsLease = true) { fixture, leaseId ->
+                    fixture.core.handleDiscreteCommand(
+                        "session-a",
+                        ConsoleDiscreteCommand(
+                            "early-deadline-command",
+                            checkNotNull(leaseId),
+                            ConsoleDiscreteAction.TAKEOFF,
+                            1_000L,
+                        ),
+                    ).reason
+                },
+                GateCase("control", needsLease = true) { fixture, leaseId ->
+                    fixture.core.handleControlFrame(
+                        "session-a",
+                        frame(checkNotNull(leaseId), 1L),
+                    ).reason
+                },
+            )
+
+        cases.forEach { case ->
+            val fixture = commissioningFixture()
+            fixture.core.openSession("session-a")
+            val grant =
+                checkNotNull(
+                    fixture.core.startHardwareCommissioning(
+                        "session-a",
+                        setOf(
+                            ConsoleActuationIntent.TAKEOFF,
+                            ConsoleActuationIntent.VIRTUAL_STICK,
+                        ),
+                        5_000L,
+                    ).session,
+                )
+            val attachedDeadline = fixture.scheduler.tasks.single()
+            val leaseId =
+                if (case.needsLease) {
+                    checkNotNull(fixture.core.acquireLease("session-a", 5_000L).leaseId)
+                } else {
+                    null
+                }
+
+            fixture.scheduler.blockNextScheduleReturn = true
+            val pool = Executors.newSingleThreadExecutor()
+            try {
+                val earlyCallback =
+                    pool.submit(
+                        Callable {
+                            fixture.scheduler.forceRun(attachedDeadline)
+                            true
+                        },
+                    )
+                assertTrue(fixture.scheduler.blockedScheduleEntered.await(1L, TimeUnit.SECONDS))
+                assertFalse("replacement schedule returned for ${case.label}", earlyCallback.isDone)
+
+                assertEquals(
+                    "gate=${case.label}",
+                    "actuation_not_ready",
+                    case.attempt(fixture, leaseId),
+                )
+                assertTrue("discrete side effect for ${case.label}", fixture.executor.discrete.isEmpty())
+                assertTrue("control side effect for ${case.label}", fixture.executor.controls.isEmpty())
+
+                fixture.scheduler.releaseBlockedSchedule.countDown()
+                assertTrue(earlyCallback.get(1L, TimeUnit.SECONDS))
+                assertEquals(grant.generation, fixture.commissioningLifecycle.currentSession()?.generation)
+                if (case.needsLease) {
+                    assertEquals(ConsoleLeaseStatus.HELD, fixture.core.currentLease()?.status)
+                } else {
+                    assertEquals(
+                        ConsoleLeaseStatus.HELD,
+                        fixture.core.acquireLease("session-a", 5_000L).status,
+                    )
+                }
+            } finally {
+                fixture.scheduler.releaseBlockedSchedule.countDown()
+                pool.shutdownNow()
+            }
+        }
+    }
+
+    @Test
+    fun `old control completion audit failure revokes replacement generation lease with fresh neutral`() {
+        val lifecycle = ConsoleCommissioningLifecycle { FIXED_COMMISSIONING_ID }
+        val fixture = commissioningFixture(lifecycle)
+        fixture.core.openSession("session-a")
+        val first =
+            checkNotNull(
+                fixture.core.startHardwareCommissioning(
+                    "session-a",
+                    setOf(ConsoleActuationIntent.VIRTUAL_STICK),
+                    5_000L,
+                ).session,
+            )
+        val oldLease = checkNotNull(fixture.core.acquireLease("session-a", 5_000L).leaseId)
+        fixture.executor.completeControlImmediately = false
+        assertEquals(
+            ConsoleControlStatus.APPLIED,
+            fixture.core.handleControlFrame("session-a", frame(oldLease, 1L)).status,
+        )
+
+        assertEquals(
+            ConsoleCommissioningRevokeDecision.REVOKED,
+            fixture.core.revokeHardwareCommissioning(first),
+        )
+        assertEquals(1, fixture.executor.neutralCalls.size)
+        val replacement =
+            checkNotNull(
+                fixture.core.startHardwareCommissioning(
+                    "session-a",
+                    setOf(ConsoleActuationIntent.VIRTUAL_STICK),
+                    5_000L,
+                ).session,
+            )
+        assertTrue(replacement.generation > first.generation)
+        val replacementLease =
+            checkNotNull(fixture.core.acquireLease("session-a", 5_000L).leaseId)
+        assertTrue(replacementLease != oldLease)
+
+        fixture.audit.failKinds += ConsoleAuditKind.CONTROL_COMPLETED
+        fixture.executor.completeNextControl(
+            ConsoleExecutionResult(true, detail = "stale control completion"),
+        )
+
+        assertNull(fixture.commissioningLifecycle.currentSession())
+        assertNull(fixture.core.currentLease())
+        assertEquals(2, fixture.executor.neutralCalls.size)
+        assertEquals(replacementLease, fixture.executor.neutralCalls.last().first)
+        assertEquals(
+            ConsoleSafetyTrigger.ACTUATION_READINESS_LOST,
+            fixture.executor.neutralCalls.last().second,
+        )
+        assertEquals("audit_unavailable", fixture.core.acquireLease("session-a", 5_000L).reason)
+    }
+
+    @Test
+    fun `terminal audit failure preserves async discrete neutral completion exactly once`() {
+        val fixture = commissioningFixture()
+        fixture.core.openSession("session-a")
+        val grant =
+            checkNotNull(
+                fixture.core.startHardwareCommissioning(
+                    "session-a",
+                    setOf(ConsoleActuationIntent.TAKEOFF),
+                    5_000L,
+                ).session,
+            )
+        val lease = checkNotNull(fixture.core.acquireLease("session-a", 5_000L).leaseId)
+        fixture.executor.completeDiscreteImmediately = false
+        val ack =
+            fixture.core.handleDiscreteCommand(
+                "session-a",
+                ConsoleDiscreteCommand(
+                    "async-terminal-audit-failure",
+                    lease,
+                    ConsoleDiscreteAction.TAKEOFF,
+                    1_000L,
+                ),
+            )
+        assertEquals(ConsoleCommandDecision.ACCEPTED, ack.decision)
+        assertEquals(1, fixture.executor.discrete.size)
+        assertEquals(1, fixture.executor.neutralCalls.size)
+
+        fixture.executor.completeNeutralImmediately = false
+        fixture.audit.failKinds += ConsoleAuditKind.COMMISSIONING_TERMINATED
+        assertEquals(
+            ConsoleCommissioningRevokeDecision.REVOKED_AUDIT_UNAVAILABLE,
+            fixture.core.revokeHardwareCommissioning(grant),
+        )
+        assertEquals(2, fixture.executor.neutralCalls.size)
+        assertTrue(
+            fixture.events.events.none {
+                (it.second as? ConsoleCoreEvent.CommandCompleted)?.result?.commandId ==
+                    "async-terminal-audit-failure"
+            },
+        )
+
+        fixture.executor.completeNextNeutral(
+            ConsoleExecutionResult(true, detail = "terminal neutral completed"),
+        )
+        val completionsAfterNeutral =
+            fixture.events.events.mapNotNull { it.second as? ConsoleCoreEvent.CommandCompleted }
+                .filter { it.result.commandId == "async-terminal-audit-failure" }
+        assertEquals(1, completionsAfterNeutral.size)
+        assertEquals(ConsoleCommandOutcome.FAILED, completionsAfterNeutral.single().result.outcome)
+        assertEquals("commissioning_host_revoked", completionsAfterNeutral.single().result.reason)
+        assertEquals(2, fixture.executor.neutralCalls.size)
+
+        fixture.executor.completeNextDiscrete(
+            ConsoleExecutionResult(true, detail = "late executor success"),
+        )
+        val completionsAfterLateSuccess =
+            fixture.events.events.mapNotNull { it.second as? ConsoleCoreEvent.CommandCompleted }
+                .filter { it.result.commandId == "async-terminal-audit-failure" }
+        assertEquals(1, completionsAfterLateSuccess.size)
+        assertEquals(ConsoleCommandOutcome.FAILED, completionsAfterLateSuccess.single().result.outcome)
+        assertEquals(2, fixture.executor.neutralCalls.size)
+        assertEquals("audit_unavailable", fixture.core.acquireLease("session-a", 5_000L).reason)
     }
 
     @Test
@@ -1702,6 +2735,14 @@ class ConsoleServerCoreTest {
         yaw = -0.5,
     )
 
+    private fun commissioningFixture(
+        lifecycle: ConsoleCommissioningLifecycle = ConsoleCommissioningLifecycle(),
+    ) = Fixture(
+        initialReadiness = DJI_COMMISSIONING_READINESS,
+        initialObservation = DJI_COMMISSIONING_OBSERVATION,
+        commissioningLifecycleOverride = lifecycle,
+    )
+
     private fun awaitBlocked(thread: Thread) {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L)
         while (thread.state != Thread.State.BLOCKED && System.nanoTime() < deadline) {
@@ -1715,6 +2756,8 @@ class ConsoleServerCoreTest {
         eventSinkOverride: ConsoleEventSink? = null,
         leaseIdFactoryOverride: (() -> String)? = null,
         initialReadiness: ConsoleActuationReadinessSnapshot = ConsoleActuationReadinessSnapshot.MOCK_READY,
+        initialObservation: ConsoleActuationObservation = ConsoleActuationObservation.UNAVAILABLE,
+        commissioningLifecycleOverride: ConsoleCommissioningLifecycle? = null,
     ) {
         val clock = FakeClock()
         val scheduler = FakeScheduler(clock)
@@ -1723,6 +2766,7 @@ class ConsoleServerCoreTest {
         val events = RecordingEventSink()
         private val leaseIds = AtomicInteger()
         private val authorityIds = AtomicInteger()
+        val commissioningLifecycle = commissioningLifecycleOverride ?: ConsoleCommissioningLifecycle()
         val core =
             ConsoleServerCore(
                 config = config,
@@ -1740,7 +2784,9 @@ class ConsoleServerCoreTest {
                 auditSink = audit,
                 eventSink = eventSinkOverride ?: events,
                 initialActuationReadiness = initialReadiness,
+                initialActuationObservation = initialObservation,
                 leaseIdFactory = leaseIdFactoryOverride ?: { "lease-${leaseIds.incrementAndGet()}" },
+                commissioningLifecycle = commissioningLifecycle,
             )
     }
 
@@ -1759,6 +2805,14 @@ class ConsoleServerCoreTest {
         val tasks = mutableListOf<Task>()
         var throwOnNextSchedule = false
         var afterNextSchedule: (() -> Unit)? = null
+        var invokeNextTaskSynchronously = false
+        var invokeEveryTaskSynchronously = false
+        var throwOnNextCancel = false
+        var reentrantScheduleCalls = 0
+        var blockNextScheduleReturn = false
+        val blockedScheduleEntered = CountDownLatch(1)
+        val releaseBlockedSchedule = CountDownLatch(1)
+        private var scheduleDepth = 0
 
         override fun scheduleAt(deadlineNanos: Long, task: () -> Unit): ConsoleScheduledTask {
             if (throwOnNextSchedule) {
@@ -1767,8 +2821,32 @@ class ConsoleServerCoreTest {
             }
             val scheduled = Task(deadlineNanos, task)
             tasks += scheduled
+            if (scheduleDepth > 0) reentrantScheduleCalls += 1
             afterNextSchedule?.also { afterNextSchedule = null }?.invoke()
-            return ConsoleScheduledTask { scheduled.cancelled = true }
+            if (blockNextScheduleReturn) {
+                blockNextScheduleReturn = false
+                blockedScheduleEntered.countDown()
+                check(releaseBlockedSchedule.await(2, TimeUnit.SECONDS)) {
+                    "timed out waiting to release scheduler"
+                }
+            }
+            if ((invokeNextTaskSynchronously || invokeEveryTaskSynchronously) && scheduleDepth == 0) {
+                invokeNextTaskSynchronously = false
+                scheduled.ran = true
+                scheduleDepth += 1
+                try {
+                    scheduled.callback()
+                } finally {
+                    scheduleDepth -= 1
+                }
+            }
+            return ConsoleScheduledTask {
+                if (throwOnNextCancel) {
+                    throwOnNextCancel = false
+                    error("scheduler cancel unavailable")
+                }
+                scheduled.cancelled = true
+            }
         }
 
         fun runDue() {
@@ -1797,9 +2875,11 @@ class ConsoleServerCoreTest {
         val operations = mutableListOf<String>()
         val controlInvocations = AtomicInteger()
         private val pendingDiscrete = ArrayDeque<(ConsoleExecutionResult) -> Unit>()
+        private val pendingControl = ArrayDeque<(ConsoleExecutionResult) -> Unit>()
         private val pendingNeutral = ArrayDeque<(ConsoleExecutionResult) -> Unit>()
         private var maximumNeutralizedEpoch = -1L
         var completeDiscreteImmediately = true
+        var completeControlImmediately = true
         var completeNeutralImmediately = true
         var neutralResult = ConsoleExecutionResult(true, detail = "mock neutral")
         var controlResult = ConsoleExecutionResult(true, detail = "SIMULATED control")
@@ -1836,7 +2916,7 @@ class ConsoleServerCoreTest {
             }
             controls += frame
             operations += "control"
-            callback(controlResult)
+            if (completeControlImmediately) callback(controlResult) else pendingControl += callback
         }
 
         override fun neutralize(
@@ -1858,6 +2938,14 @@ class ConsoleServerCoreTest {
             pendingNeutral.removeFirst()(result)
         }
 
+        fun completeLastNeutral(result: ConsoleExecutionResult) {
+            pendingNeutral.removeLast()(result)
+        }
+
+        fun completeNextControl(result: ConsoleExecutionResult) {
+            pendingControl.removeFirst()(result)
+        }
+
         fun completeNextDiscrete(result: ConsoleExecutionResult) {
             pendingDiscrete.removeFirst()(result)
         }
@@ -1865,18 +2953,22 @@ class ConsoleServerCoreTest {
 
     private class RecordingAuditSink : ConsoleAuditSink {
         val events = mutableListOf<ConsoleAuditEvent>()
+        val attempts = mutableListOf<ConsoleAuditEvent>()
         val failKinds = mutableSetOf<ConsoleAuditKind>()
         var blockKind: ConsoleAuditKind? = null
+        var afterNextRecord: ((ConsoleAuditEvent) -> Unit)? = null
         val blockEntered = CountDownLatch(1)
         val unblock = CountDownLatch(1)
 
         override fun record(event: ConsoleAuditEvent) {
+            attempts += event
             if (event.kind in failKinds) error("audit unavailable")
             if (event.kind == blockKind) {
                 blockEntered.countDown()
                 check(unblock.await(2, TimeUnit.SECONDS)) { "timed out waiting to unblock audit" }
             }
             events += event
+            afterNextRecord?.also { afterNextRecord = null }?.invoke(event)
         }
     }
 
@@ -1885,5 +2977,23 @@ class ConsoleServerCoreTest {
         override fun emit(targetSessionId: String?, event: ConsoleCoreEvent) {
             events += targetSessionId to event
         }
+    }
+
+    private companion object {
+        const val FIXED_COMMISSIONING_ID = "00000000-0000-4000-8000-000000000001"
+        val DJI_COMMISSIONING_READINESS =
+            ConsoleActuationReadinessSnapshot(
+                adapter = AdapterKind.DJI,
+                aircraftConnection = AircraftConnectionState.CONNECTED,
+                actuationLock = ActuationLockState.LOCKED,
+                operatingProfile = OperatingProfile.HARDWARE_COMMISSIONING,
+            )
+        val DJI_COMMISSIONING_OBSERVATION =
+            ConsoleActuationObservation(
+                adapter = AdapterKind.DJI,
+                aircraftConnection = AircraftConnectionState.CONNECTED,
+                adapterActuationReady = true,
+                operatingProfile = OperatingProfile.HARDWARE_COMMISSIONING,
+            )
     }
 }
