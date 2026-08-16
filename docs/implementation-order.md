@@ -189,11 +189,12 @@ pointer-capture 失敗、鍵盤焦點轉移、window blur、visibility/pagehide 
 同一個 idempotent neutral 路徑；protocol error 會鎖住當前 session 並重連。UI 狀態
 保留 `UNKNOWN` capability，也不會把 targeted lease denial 誤當全域 lease truth。
 
-**2026-08-16 browser acceptance**：Windows 筆電常見的 1366×768 viewport 已由真實瀏覽器
-連上 loopback runner 驗證。TAKEOFF／LANDING／RTH 使用頁內 modal 明確確認；取消不會
-dispatch，確認後 UI 會顯示 ack/result。六向控制全數收到 `APPLIED`，每次釋放都收到
-neutral `SUCCEEDED`；第二個 browser session 在 lease 已持有時維持 blocked，釋放後同步
-恢復可取得。17 列 target-stack capability 仍全為 `UNKNOWN`。
+**2026-08-16 browser acceptance**：真實 Chromium browser 已在 1280px 寬 viewport 連上
+loopback runner 驗證。TAKEOFF／LANDING／RTH 使用頁內 modal 明確確認；取消不會 dispatch，
+確認後 UI 會顯示 ack/result。六向控制全數收到 `APPLIED`，每次釋放都收到 neutral
+`SUCCEEDED`；第二個 browser session 在 lease 已持有時維持 blocked，釋放後同步恢復可取得。
+17 列 target-stack capability 仍全為 `UNKNOWN`。candidate-bound 截圖、去識別 audit 統計與
+hash 見 [`docs/evidence/browser-control-runtime-2ed458f.md`](evidence/browser-control-runtime-2ed458f.md)。
 
 ### S6　點對點 Ethernet commissioning profile（issue #6）
 

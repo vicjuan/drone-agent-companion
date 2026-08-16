@@ -1,0 +1,100 @@
+{
+  "schemaVersion": "browser-control-runtime-summary/1",
+  "sourceCommit": "2ed458f85d3ea4cd6b836e35aa09aaada1318ba5",
+  "capturedAtStart": "2026-08-16T00:08:44Z",
+  "capturedAtEnd": "2026-08-16T00:13:13Z",
+  "runtimeProfile": "localhost-adapter-mock",
+  "consoleOrigin": "http://127.0.0.1:18081",
+  "browser": {
+    "client": "Codex in-app Chromium",
+    "viewportWidth": 1280,
+    "viewportHeight": 1079
+  },
+  "rawAudit": {
+    "committed": false,
+    "reasonNotCommitted": "Contains ephemeral session and lease identifiers.",
+    "sha256": "1e7178bbb702ef353b6f2bb09e0f06a931510349c064da33e587e39e864dd588",
+    "bytes": 31030,
+    "records": 77,
+    "durationMillis": 268971
+  },
+  "auditCounts": {
+    "actuation_readiness_changed": 3,
+    "session_opened": 2,
+    "lease_acquired": 3,
+    "lease_renewed": 25,
+    "lease_released": 3,
+    "command_admitted": 3,
+    "command_completed": 3,
+    "control_admitted": 6,
+    "control_completed": 6,
+    "safety_neutral_requested": 10,
+    "safety_neutral_completed": 10,
+    "session_disconnected": 2,
+    "server_stopped": 1
+  },
+  "correlation": {
+    "distinctSessions": 2,
+    "distinctLeases": 3,
+    "distinctAuthorityDecisionIds": 9,
+    "distinctIntentDigests": 9
+  },
+  "controls": {
+    "directionsExercised": 6,
+    "applied": 6,
+    "operatorReleaseNeutralSucceeded": 6,
+    "lastAppliedSequence": 12
+  },
+  "commands": [
+    {
+      "kind": "takeoff",
+      "outcome": "succeeded",
+      "boundary": "adapter-mock simulation"
+    },
+    {
+      "kind": "return_to_home",
+      "outcome": "succeeded",
+      "boundary": "companion-owned simulation; vendor adapter-mock has no RTH action port"
+    },
+    {
+      "kind": "landing",
+      "outcome": "succeeded",
+      "boundary": "adapter-mock simulation"
+    }
+  ],
+  "lease": {
+    "secondSessionBlockedWhileHeld": true,
+    "releasedAfterPrimaryDisconnect": true
+  },
+  "safety": {
+    "windowBlurNeutralSucceededBeforeDisconnect": true,
+    "serverStopRecorded": true
+  },
+  "capabilityMatrix": {
+    "rowCount": 17,
+    "unknownCount": 17,
+    "statusPromoted": false
+  },
+  "screenshots": [
+    {
+      "path": "browser-control-runtime-2ed458f-receipts.jpg",
+      "sha256": "f7eeae6116f82090e434d58e7c80a828d4058193a35a7a1a7a34f0cc8dbfe447",
+      "bytes": 87997,
+      "width": 1280,
+      "height": 720
+    },
+    {
+      "path": "browser-control-runtime-2ed458f-lease-gate.jpg",
+      "sha256": "1ed0f213a39e805f0eccb153397139975d0682bd46429016f38dda3e4bf9426f",
+      "bytes": 100602,
+      "width": 1280,
+      "height": 1079
+    }
+  ],
+  "claims": {
+    "highest": "RUNTIME_VERIFIED",
+    "scope": "Mac localhost browser plus adapter-mock",
+    "g520HardwareVerified": false,
+    "djiRuntimeVerified": false
+  }
+}
