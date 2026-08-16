@@ -1,5 +1,6 @@
 package com.durendal.droneagent.companion.console.runner
 
+import com.durendal.droneagent.companion.console.server.security.ConsoleExposureProfile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -8,8 +9,12 @@ import org.junit.Test
 class ConsoleRunnerProfileTest {
     @Test
     fun `development runner remains loopback only`() {
-        assertEquals("127.0.0.1", ConsoleRunnerProfile.BIND_HOST)
-        assertEquals(8080, ConsoleRunnerProfile.BIND_PORT)
+        with(ConsoleRunnerProfile.exposure()) {
+            assertEquals(ConsoleExposureProfile.LOCALHOST_DEVELOPMENT, profile)
+            assertEquals("127.0.0.1", bindHost)
+            assertEquals(8080, bindPort)
+            assertEquals("http://127.0.0.1:8080", allowedBrowserOrigin)
+        }
         assertEquals("http://127.0.0.1:8891", ConsoleRunnerProfile.MEDIA_PLAYBACK_ORIGIN)
 
         val media = ConsoleRunnerProfile.mediaPlaybackConfig()
@@ -29,7 +34,8 @@ class ConsoleRunnerProfileTest {
         assertTrue(config.webRoot.endsWith("web-output"))
         assertTrue(config.auditPath.endsWith("state/audit.jsonl"))
         assertEquals(18081, config.bindPort)
-        assertEquals("127.0.0.1", ConsoleRunnerProfile.BIND_HOST)
+        assertEquals("127.0.0.1", ConsoleRunnerProfile.exposure(config.bindPort).bindHost)
+        assertEquals(18081, ConsoleRunnerProfile.exposure(config.bindPort).bindPort)
     }
 
     @Test

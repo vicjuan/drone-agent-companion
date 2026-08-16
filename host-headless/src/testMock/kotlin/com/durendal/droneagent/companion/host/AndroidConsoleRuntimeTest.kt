@@ -206,13 +206,14 @@ class AndroidConsoleRuntimeTest {
         )
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun `mock composition rejects an origin other than the fixed adb-forward endpoint`() {
-        AndroidConsoleRuntimeConfig(
-            webRoot = temporaryFolder.newFolder("origin-web"),
-            auditFile = temporaryFolder.root.resolve("origin/audit.jsonl"),
-            allowedBrowserOrigin = "http://127.0.0.1:8080",
-        )
+    @Test
+    fun `mock composition config has no caller-controlled bind host or browser origin`() {
+        val constructorParameters =
+            AndroidConsoleRuntimeConfig::class.java.constructors
+                .flatMap { it.parameterTypes.asIterable() }
+
+        assertFalse(constructorParameters.contains(String::class.java))
+        assertEquals(18_080, AndroidConsoleRuntimeConfig.FORWARDED_BROWSER_PORT)
     }
 
     @Test

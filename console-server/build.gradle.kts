@@ -7,6 +7,7 @@ kotlin {
 }
 
 dependencies {
+    api(project(":commissioning-network"))
     implementation(project(":console-protocol"))
     implementation(project(":capability-matrix"))
     implementation(libs.ktor.server.core)

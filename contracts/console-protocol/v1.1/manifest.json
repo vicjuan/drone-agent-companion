@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "protocolVersion": "1.1",
   "baseProtocolVersion": "1.0",
-  "baseCanonicalSha256": "6586515b8ad90ab58bb6e311087362a428ad06cd71a1c2ada5b5f62a8461aff5",
+  "baseCanonicalSha256": "db58855f7d33590af8130f77ff0a080f36ef208cab9c9c71be2a504ba82dead3",
   "bootstrapProtocolVersion": "1.0",
   "envelopeFields": ["protocolVersion", "messageId", "type", "payload"],
   "addedClientMessageTypes": [],

@@ -39,6 +39,8 @@ touch UI is replaced by an on-device web server operated from a browser.
   Mac synthetic runtime result, conservative latency samples and explicit hardware limitations.
 - [`docs/g520-point-to-point-ethernet-commissioning.md`](docs/g520-point-to-point-ethernet-commissioning.md):
   fail-closed Windows/G520 direct-Ethernet preparation and the remaining hardware gates.
+- [`docs/production-web-console-security.md`](docs/production-web-console-security.md):
+  fail-closed exposure/authentication foundation and the remaining TLS/credential lifecycle gate.
 
 ## Workspace bootstrap
 

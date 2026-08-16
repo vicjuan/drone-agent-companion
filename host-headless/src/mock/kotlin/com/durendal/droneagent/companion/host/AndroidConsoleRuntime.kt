@@ -14,6 +14,7 @@ import com.durendal.droneagent.companion.console.server.ConsoleServerCore
 import com.durendal.droneagent.companion.console.server.ConsoleServerCoreConfig
 import com.durendal.droneagent.companion.console.server.FileConsoleAuditSink
 import com.durendal.droneagent.companion.console.server.JdkConsoleDeadlineScheduler
+import com.durendal.droneagent.companion.console.server.security.ConsoleExposurePolicy
 import com.durendal.droneagent.companion.console.server.toActuationReadiness
 import com.durendal.droneagent.companion.console.server.transport.ConsoleCoreProtocolAdapter
 import com.durendal.droneagent.companion.console.server.transport.ConsoleSnapshotProvider
@@ -29,28 +30,19 @@ import java.util.concurrent.atomic.AtomicReference
 data class AndroidConsoleRuntimeConfig(
     val webRoot: File,
     val auditFile: File,
-    val bindHost: String = BIND_HOST,
     val bindPort: Int = BIND_PORT,
-    val allowedBrowserOrigin: String = FORWARDED_BROWSER_ORIGIN,
     val serverStartupTimeoutMillis: Long = 10_000L,
 ) {
     init {
-        require(bindHost == BIND_HOST) {
-            "emulator mock host must remain bound to the IPv4 loopback interface"
-        }
         require(bindPort in 1..65_535) { "bindPort must be between 1 and 65535" }
-        require(allowedBrowserOrigin == FORWARDED_BROWSER_ORIGIN) {
-            "emulator mock host must admit only the fixed adb-forward browser origin"
-        }
         require(serverStartupTimeoutMillis in 100L..60_000L) {
             "serverStartupTimeoutMillis must be between 100 and 60000"
         }
     }
 
     companion object {
-        const val BIND_HOST: String = "127.0.0.1"
         const val BIND_PORT: Int = 8080
-        const val FORWARDED_BROWSER_ORIGIN: String = "http://127.0.0.1:18080"
+        const val FORWARDED_BROWSER_PORT: Int = 18_080
     }
 }
 
@@ -305,11 +297,13 @@ class AndroidConsoleRuntime internal constructor(
             controllerReference.set(controller)
             val server =
                 KtorConsoleServer(
-                    ConsoleServerConfig(
-                        bindHost = config.bindHost,
-                        bindPort = config.bindPort,
+                    ConsoleServerConfig.create(
+                        exposure =
+                            ConsoleExposurePolicy.localhostDevelopment(
+                                bindPort = config.bindPort,
+                                browserPort = AndroidConsoleRuntimeConfig.FORWARDED_BROWSER_PORT,
+                            ),
                         webRoot = config.webRoot.toPath(),
-                        allowedBrowserOrigin = config.allowedBrowserOrigin,
                         startupTimeoutMillis = config.serverStartupTimeoutMillis,
                     ),
                     controller,

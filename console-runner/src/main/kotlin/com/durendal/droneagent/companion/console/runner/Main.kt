@@ -12,6 +12,8 @@ import com.durendal.droneagent.companion.console.server.ConsoleServerCore
 import com.durendal.droneagent.companion.console.server.ConsoleServerCoreConfig
 import com.durendal.droneagent.companion.console.server.FileConsoleAuditSink
 import com.durendal.droneagent.companion.console.server.JdkConsoleDeadlineScheduler
+import com.durendal.droneagent.companion.console.server.security.ConsoleExposure
+import com.durendal.droneagent.companion.console.server.security.ConsoleExposurePolicy
 import com.durendal.droneagent.companion.console.server.toActuationReadiness
 import com.durendal.droneagent.companion.console.server.transport.ConsoleCoreProtocolAdapter
 import com.durendal.droneagent.companion.console.server.transport.ConsoleMediaPlaybackConfig
@@ -26,7 +28,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 object ConsoleRunnerProfile {
-    const val BIND_HOST: String = "127.0.0.1"
     const val BIND_PORT: Int = 8080
     const val AGENT_ID: String = "mock"
     const val STREAM_ID: String = "mock-main"
@@ -38,6 +39,9 @@ object ConsoleRunnerProfile {
             origin = MEDIA_PLAYBACK_ORIGIN,
             streamId = STREAM_ID,
         )
+
+    fun exposure(bindPort: Int = BIND_PORT): ConsoleExposure =
+        ConsoleExposurePolicy.localhostDevelopment(bindPort)
 }
 
 data class ConsoleRunnerConfig(
@@ -112,14 +116,15 @@ fun main(args: Array<String>) {
     coreReference.set(core)
     val controller = ProtocolConsoleSocketController(protocol)
     controllerReference.set(controller)
+    val serverConfig =
+        ConsoleServerConfig.create(
+            exposure = ConsoleRunnerProfile.exposure(config.bindPort),
+            webRoot = config.webRoot,
+            mediaPlayback = ConsoleRunnerProfile.mediaPlaybackConfig(),
+        )
     val server =
         KtorConsoleServer(
-            ConsoleServerConfig(
-                bindHost = ConsoleRunnerProfile.BIND_HOST,
-                bindPort = config.bindPort,
-                webRoot = config.webRoot,
-                mediaPlayback = ConsoleRunnerProfile.mediaPlaybackConfig(),
-            ),
+            serverConfig,
             controller,
         )
 
@@ -160,7 +165,7 @@ fun main(args: Array<String>) {
         agent.telemetry.start()
         println(
             "[console-runner] adapter=mock profile=localhost_development " +
-                "http://${ConsoleRunnerProfile.BIND_HOST}:${config.bindPort}",
+                serverConfig.allowedBrowserOrigin,
         )
         println(
             "[console-runner] media=synthetic_mac configured_only=true " +

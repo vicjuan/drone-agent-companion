@@ -50,6 +50,7 @@ import com.durendal.droneagent.companion.console.server.ConsoleScheduledTask
 import com.durendal.droneagent.companion.console.server.ConsoleServerCore
 import com.durendal.droneagent.companion.console.server.ConsoleServerCoreConfig
 import com.durendal.droneagent.companion.console.server.FileConsoleAuditSink
+import com.durendal.droneagent.companion.console.server.security.ConsoleExposurePolicy
 import com.durendal.droneagent.companion.console.server.transport.ConsoleCoreProtocolAdapter
 import com.durendal.droneagent.companion.console.server.transport.ConsoleRoutes
 import com.durendal.droneagent.companion.console.server.transport.ConsoleServerConfig
@@ -142,7 +143,10 @@ class ConsoleRunnerEndToEndTest {
             testApplication {
                 application {
                     installConsoleApplication(
-                        ConsoleServerConfig("127.0.0.1", 0, webRoot),
+                        ConsoleServerConfig.create(
+                            exposure = ConsoleExposurePolicy.localhostDevelopment(bindPort = 0),
+                            webRoot = webRoot,
+                        ),
                         fixture.controller,
                         sessionIdFactory = fixture::nextSessionId,
                     )

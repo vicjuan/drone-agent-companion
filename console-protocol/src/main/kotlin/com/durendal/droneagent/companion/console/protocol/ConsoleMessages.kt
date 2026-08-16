@@ -436,6 +436,9 @@ enum class ProtocolErrorCode(val wireName: String) {
     @SerialName("wrong_message_direction") WRONG_MESSAGE_DIRECTION("wrong_message_direction"),
     @SerialName("invalid_payload") INVALID_PAYLOAD("invalid_payload"),
     @SerialName("handshake_required") HANDSHAKE_REQUIRED("handshake_required"),
+    @SerialName("authentication_required") AUTHENTICATION_REQUIRED("authentication_required"),
+    @SerialName("authentication_failed") AUTHENTICATION_FAILED("authentication_failed"),
+    @SerialName("authorization_failed") AUTHORIZATION_FAILED("authorization_failed"),
     @SerialName("unexpected_message") UNEXPECTED_MESSAGE("unexpected_message"),
     @SerialName("server_unavailable") SERVER_UNAVAILABLE("server_unavailable"),
 }

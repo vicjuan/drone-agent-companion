@@ -260,6 +260,9 @@ export interface ProtocolErrorPayload {
     | "wrong_message_direction"
     | "invalid_payload"
     | "handshake_required"
+    | "authentication_required"
+    | "authentication_failed"
+    | "authorization_failed"
     | "unexpected_message"
     | "server_unavailable";
   readonly detail: string | null;
@@ -1225,6 +1228,9 @@ function validateProtocolError(value: unknown): void {
       "wrong_message_direction",
       "invalid_payload",
       "handshake_required",
+      "authentication_required",
+      "authentication_failed",
+      "authorization_failed",
       "unexpected_message",
       "server_unavailable",
     ],

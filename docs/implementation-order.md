@@ -231,6 +231,14 @@ commissioning 例外變成所有介面的 production 預設。
 **完成判準**：未認證連線只能取得健康檢查端點，有測試證明；認證失敗寫 audit；
 共享網路 profile 不提供 cleartext command surface。
 
+**2026-08-16 準備狀態**：開始以 pure-JVM exposure policy 與 authentication admission
+kernel 封住 generic LAN cleartext／pre-auth core session；shared/routable production profile
+仍明確 disabled，point-to-point commissioning 也只能產生 non-runnable candidate，不能在缺少
+live Android Network pin／freshness gate 時開 listener。TLS connector、自簽憑證信任、credential provisioning／rotation、active
+session expiry／revocation、authenticated HTTP bootstrap 與目標環境 runtime evidence 尚未
+完成，因此不得把此準備切片當成 issue #5 驗收。詳見
+[`production-web-console-security.md`](production-web-console-security.md)。
+
 ### S8　無頭 Android host，在 emulator 上（issue #2）
 
 到這裡才需要 Android。`RECEIVE_BOOT_COMPLETED` receiver 啟動 foreground

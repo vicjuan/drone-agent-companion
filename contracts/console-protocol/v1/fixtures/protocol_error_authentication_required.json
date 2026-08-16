@@ -1,0 +1,10 @@
+{
+  "protocolVersion": "1.0",
+  "messageId": "fixture-protocol-error-auth-required-001",
+  "type": "protocol_error",
+  "payload": {
+    "relatedMessageId": "fixture-client-hello-001",
+    "code": "authentication_required",
+    "detail": "Authentication is required for this session."
+  }
+}

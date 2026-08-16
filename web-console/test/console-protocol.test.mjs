@@ -60,6 +60,9 @@ const expectedProtocolErrorCodes = [
   "wrong_message_direction",
   "invalid_payload",
   "handshake_required",
+  "authentication_required",
+  "authentication_failed",
+  "authorization_failed",
   "unexpected_message",
   "server_unavailable",
 ];
