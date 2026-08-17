@@ -51,6 +51,15 @@ accessory lifecycle, MSDK registration/connection, the fixed `10.52.0.0/30` Cons
 Windows MediaMTX, and decoded NV21 → OpenCV observation. Use the runbook above and
 `scripts/install-g520-office-mvp.sh`; do not substitute the Mac synthetic fixture for DJI video.
 
+> **Headless first-boot gate:** the target G520 exposes RJ45 but no HDMI display path. Its Android
+> image must therefore expose an already enabled and authorized ADB-over-TCP endpoint on a known
+> bootstrap IP, or provide equivalent platform-signed provisioning. Runtime permissions can be
+> granted through ADB, and a reachable Android virtual display can be operated through `scrcpy`,
+> but a normal APK cannot silently grant its own first USB-accessory authorization. If network ADB,
+> a controllable System UI, and a pre-provisioned privileged/default USB handler are all absent,
+> first-time RC-N3 commissioning is blocked. Switching the board to `10.52.0.2/30` also drops the
+> bootstrap ADB connection; confirm that `adbd` remains reachable and reconnect at the new address.
+
 Until a physical G520, RC-N3 and Mini 4 Pro have produced first-hand evidence from the exact APK,
 the capability matrix remains 17/17 `UNKNOWN` and this section is a candidate handoff, not a
 hardware-verification claim.

@@ -5,13 +5,21 @@ fixed to the isolated Ethernet `/30`; it is not a general LAN deployment profile
 
 ## Required order
 
-1. While the G520 still has ordinary Internet access, install/start the APK, attach RC-N3 and
-   Mini 4 Pro, accept the Android USB accessory prompt, and wait for logcat to show
+1. Before installing anything, connect to the G520's known bootstrap IP through RJ45 and prove
+   that its Android image already exposes an authorized ADB-over-TCP endpoint. The target board
+   has no HDMI fallback. If network ADB is unavailable, stop: a normal APK cannot provision the
+   debug channel or approve its own first USB-accessory dialog.
+2. While the G520 still has ordinary Internet access, install/start the APK, attach RC-N3 and
+   Mini 4 Pro, grant the Android runtime permissions through ADB, and operate the first USB
+   accessory prompt through an ADB-backed virtual System UI such as `scrcpy`. Select the
+   persistent/default association when the image offers it. Wait for logcat to show
    `registration=REGISTERED` and `connection=AIRCRAFT_CONNECTED`.
-2. Only after registration succeeds, disable Wi-Fi/cellular and configure G520 `eth0` as
+3. Only after registration succeeds, disable Wi-Fi/cellular and configure G520 `eth0` as
    `10.52.0.2/30` with no gateway or DNS. The app intentionally refuses the office listener while
-   any other routed/DNS-bearing interface is active.
-3. Configure/connect the Windows adapter, start MediaMTX, then open the Console. Starting with the
+   any other routed/DNS-bearing interface is active. The bootstrap ADB connection will drop; prove
+   that `adbd` is still listening and reconnect to `10.52.0.2` on the image's documented ADB TCP
+   port before continuing.
+4. Configure/connect the Windows adapter, start MediaMTX, then open the Console. Starting with the
    isolated `/30` before first-time MSDK registration can strand registration because that network
    deliberately has no Internet route.
 
@@ -56,6 +64,61 @@ the launcher until an administrator has inspected and removed only the fixed
 `DroneAgentCompanion-G520-MediaMTX-Temporary` rule.
 
 ## G520 installation details
+
+### Headless bootstrap over RJ45
+
+The target G520 has no HDMI connector. Record the image's bootstrap IP from its provisioning
+record or DHCP lease, then verify network ADB before relying on this runbook:
+
+```bash
+export G520_BOOTSTRAP_IP='…'
+export G520_ADB_TCP_PORT='5555' # Replace only when the exact image documents another port.
+adb connect "${G520_BOOTSTRAP_IP}:${G520_ADB_TCP_PORT}"
+export G520_ADB_SERIAL="${G520_BOOTSTRAP_IP}:${G520_ADB_TCP_PORT}"
+adb -s "$G520_ADB_SERIAL" get-state
+adb -s "$G520_ADB_SERIAL" shell getprop ro.build.fingerprint
+adb -s "$G520_ADB_SERIAL" shell getprop ro.debuggable
+adb -s "$G520_ADB_SERIAL" shell wm size
+```
+
+`get-state` must report `device`. A reachable port that remains `unauthorized` is not sufficient,
+because there is no local display on which to accept the ADB host key. If the image does not expose
+an already authorized network ADB endpoint, obtain a vendor image or platform-signed provisioning
+component that does; do not assume the APK or Console can create this authority after installation.
+
+After the APK is installed, the ordinary dangerous permissions can be granted without a physical
+display. Use the exact application ID registered to the supplied DJI key:
+
+```bash
+adb -s "$G520_ADB_SERIAL" shell pm grant "$DJI_APPLICATION_ID" \
+  android.permission.ACCESS_COARSE_LOCATION
+adb -s "$G520_ADB_SERIAL" shell pm grant "$DJI_APPLICATION_ID" \
+  android.permission.ACCESS_FINE_LOCATION
+adb -s "$G520_ADB_SERIAL" shell pm grant "$DJI_APPLICATION_ID" \
+  android.permission.READ_PHONE_STATE
+adb -s "$G520_ADB_SERIAL" shell am start -n \
+  "$DJI_APPLICATION_ID/com.durendal.droneagent.companion.host.DjiCommissioningActivity"
+```
+
+These commands do **not** grant USB accessory permission. The app can request that permission, but
+Android owns the first authorization dialog. Use `scrcpy` over the authorized network ADB channel
+to operate a real or virtual Android display, or use an exact-image `uiautomator` procedure whose
+visible labels and target bounds have been inspected first. Select the persistent/default handler
+when available. If the image supplies neither a controllable System UI nor a pre-provisioned
+privileged/default USB handler, RC-N3 commissioning is blocked.
+
+Changing `eth0` from its bootstrap network to `10.52.0.2/30` terminates the old ADB socket. Before
+removing the bootstrap route, confirm that the image keeps `adbd` listening on TCP and then reconnect:
+
+```bash
+adb connect "10.52.0.2:${G520_ADB_TCP_PORT}"
+export G520_ADB_SERIAL="10.52.0.2:${G520_ADB_TCP_PORT}"
+adb -s "$G520_ADB_SERIAL" get-state
+```
+
+Do not change to the isolated `/30` until MSDK has completed its first Internet-backed registration.
+
+### Fixed Ethernet configuration
 
 Before expecting the listener to open, configure the G520 Ethernet interface as `10.52.0.2/30`
 with no gateway or DNS. The installer performs a read-only `eth0` check and warns when that exact
@@ -137,13 +200,9 @@ publishes `dji-main` RTMP to Windows and exposes decoded NV21 frames to the Open
 session.
 
 The first USB accessory grant is an Android system interaction, not a silent permission the APK can
-self-authorize. Before attaching RC-N3 for the first time, connect a temporary HDMI display and an
-input device to G520 (or use another explicitly approved system-UI control path), accept the USB
-and app runtime permission prompts (choose precise location when Android offers the choice),
-accessory prompt, and select the persistent/default association when the G520 image offers it. If
-the prompt cannot be operated and the image has no pre-provisioned system/priv-app USB grant, stop:
-MSDK registration will remain gated. Replug RC-N3 once before flight work and confirm logcat returns
-to `USB state=GRANTED` without an unattended prompt.
+self-authorize. This G520 has no HDMI fallback, so complete the RJ45 ADB and virtual-System-UI gate
+above before attaching RC-N3. Replug RC-N3 once before flight work and confirm logcat returns to
+`USB state=GRANTED` without another unattended prompt.
 
 The browser-visible DJI lock remains `LOCKED`. A five-minute, server-owned office-demo grant is
 created for the first exact point-to-point operator session and is still constrained by lease,
